@@ -1,5 +1,7 @@
 import random
 import asyncio
+import json
+import os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
@@ -8,17 +10,44 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
 TOKEN = "8949176656:AAHWimiNzkL4gN4ZxXrjkHav5V3y5DPglM8"
-ADMIN_ID = 8815793802  # Ваш Telegram ID
+ADMIN_ID = 8815793802
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Хранилище данных
+DB_FILE = "users_data.json"
 users_db = {}
 user_bets = {}
 auto_loss_limit = 300
 
-# Состояние для ввода своей ставки
+# --- ФУНКЦИИ СОХРАНЕНИЯ И ZАГРУЗКИ ДАННЫХ ---
+def load_db():
+    global users_db
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for u_id, u_data in data.items():
+                    if u_data.get("banned_until"):
+                        u_data["banned_until"] = datetime.fromisoformat(u_data["banned_until"])
+                    users_db[int(u_id)] = u_data
+        except Exception as e:
+            print(f"Ошибка загрузки БД: {e}")
+
+def save_db():
+    try:
+        data_to_save = {}
+        for u_id, u_data in users_db.items():
+            copy_data = u_data.copy()
+            if copy_data.get("banned_until"):
+                copy_data["banned_until"] = copy_data["banned_until"].isoformat()
+            data_to_save[str(u_id)] = copy_data
+        
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(data_to_save, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Ошибка сохранения БД: {e}")
+
 class BetState(StatesGroup):
     waiting_for_custom_bet = State()
 
@@ -30,12 +59,11 @@ def get_user_data(user_id: int):
             "is_deleted": False,
             "banned_until": None
         }
+        save_db()
     return users_db[user_id]
 
 def check_access(user_id: int) -> tuple[bool, str]:
-    """Проверка, может ли игрок пользоваться ботом"""
     user = get_user_data(user_id)
-    
     if user["is_deleted"]:
         return False, "❌ Вы были удалены из системы LOMTIK GAME."
     
@@ -46,31 +74,26 @@ def check_access(user_id: int) -> tuple[bool, str]:
             minutes = int(remaining.total_seconds() // 60) + 1
             return False, f"⛔ **Вы заблокированы!**\nДо окончания бана осталось: **{minutes} мин.**"
         else:
-            user["banned_until"] = None  # Бан истек
+            user["banned_until"] = None
+            save_db()
             
     return True, ""
 
 def get_status(balance: int) -> str:
-    if balance < 500:
-        return "🥉 Новичок"
-    elif balance < 2500:
-        return "🥈 Игрок"
-    elif balance < 10000:
-        return "🥇 VIP-Игрок"
-    else:
-        return "💎 Магнат LOMTIK"
+    if balance < 500: return "🥉 Новичок"
+    elif balance < 2500: return "🥈 Игрок"
+    elif balance < 10000: return "🥇 VIP-Игрок"
+    else: return "💎 Магнат LOMTIK"
 
 def should_user_lose(user_id: int, current_bet: int) -> bool:
     global auto_loss_limit
     user = get_user_data(user_id)
-    
     if user["forced_losses"] > 0:
         user["forced_losses"] -= 1
+        save_db()
         return True
-
     if current_bet >= auto_loss_limit:
         return True
-
     return False
 
 # --- КЛАВИАТУРЫ ---
@@ -92,12 +115,11 @@ def bet_keyboard(game_code: str):
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
-# --- ОСНОВНЫЕ КОМАНДЫ ---
+# --- КОМАНДЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
-    
     can_play, msg = check_access(user_id)
     if not can_play:
         await message.answer(msg, parse_mode="Markdown")
@@ -115,7 +137,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"💵 Баланс: **${data['balance']}**\n\n"
         "🔥 Испытай свою удачу прямо сейчас! Выбери игру ниже:"
     )
-    
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
 @dp.callback_query(F.data == "main_menu")
@@ -125,12 +146,7 @@ async def back_to_menu(callback: types.CallbackQuery, state: FSMContext):
     if not can_play:
         await callback.answer(msg, show_alert=True)
         return
-
-    await callback.message.edit_text(
-        "🎰 **LOMTIK GAME — Главное меню**\n\nВыберите нужную игру:",
-        reply_markup=main_keyboard(),
-        parse_mode="Markdown"
-    )
+    await callback.message.edit_text("🎰 **LOMTIK GAME — Главное меню**\n\nВыберите нужную игру:", reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "check_balance")
 async def check_balance(callback: types.CallbackQuery, state: FSMContext):
@@ -142,7 +158,6 @@ async def check_balance(callback: types.CallbackQuery, state: FSMContext):
 
     data = get_user_data(callback.from_user.id)
     status = get_status(data['balance'])
-    
     profile_text = (
         f"💳 **Профиль LOMTIK GAME**\n"
         f"━━━━━━━━━━━━━━━\n"
@@ -151,11 +166,9 @@ async def check_balance(callback: types.CallbackQuery, state: FSMContext):
         f"🏆 **Статус:** {status}\n"
         f"💰 **Баланс:** ${data['balance']}"
     )
-    
     await callback.answer(f"Твой баланс: ${data['balance']}", show_alert=True)
     await callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
-# --- ВВОД СВОЕЙ СТАВКИ ---
 @dp.callback_query(F.data.startswith("custombet_"))
 async def prompt_custom_bet(callback: types.CallbackQuery, state: FSMContext):
     can_play, msg = check_access(callback.from_user.id)
@@ -169,12 +182,7 @@ async def prompt_custom_bet(callback: types.CallbackQuery, state: FSMContext):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Отмена", callback_data="main_menu")
-    
-    await callback.message.edit_text(
-        "✍️ **Введите вашу сумму ставки числом в чат:**\n(Минимум $1)",
-        parse_mode="Markdown",
-        reply_markup=builder.as_markup()
-    )
+    await callback.message.edit_text("✍️ **Введите вашу сумму ставки числом в чат:**\n(Минимум $1)", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.message(BetState.waiting_for_custom_bet)
 async def process_custom_bet(message: types.Message, state: FSMContext):
@@ -202,23 +210,19 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     game_code = fsm_data.get("game_code")
     await state.clear()
-
     user_bets[user_id] = bet
 
     if game_code == "guess":
         builder = InlineKeyboardBuilder()
-        for num in range(1, 6):
-            builder.button(text=f"🔢 {num}", callback_data=f"play_guess_{num}")
+        for num in range(1, 6): builder.button(text=f"🔢 {num}", callback_data=f"play_guess_{num}")
         builder.adjust(5)
         await message.answer(f"🎯 **Угадай число**\n\nВаша ставка: **${bet}**\nВыбери число от 1 до 5:", parse_mode="Markdown", reply_markup=builder.as_markup())
-
     elif game_code == "hl":
         builder = InlineKeyboardBuilder()
         builder.button(text="📉 Меньше (1-3)", callback_data="play_hl_low")
         builder.button(text="📈 Больше (4-6)", callback_data="play_hl_high")
         builder.adjust(2)
         await message.answer(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nКуда упадет кость?", parse_mode="Markdown", reply_markup=builder.as_markup())
-
     elif game_code == "even":
         builder = InlineKeyboardBuilder()
         builder.button(text="🔴 Четное", callback_data="play_even_even")
@@ -226,34 +230,24 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
         builder.adjust(2)
         await message.answer(f"🎲 **Четное или Нечетное**\n\nСтавка: **${bet}**\nСделай выбор:", parse_mode="Markdown", reply_markup=builder.as_markup())
 
-# --- АДМИНКА И БАНЫ ---
+# --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
-
     text = "🛠 **ПАНЕЛЬ АДМИНИСТРАТОРА LOMTIK GAME**\n\n"
-    text += f"⚙️ Авто-проигрыш при ставке от: **${auto_loss_limit}**\n\n"
-    text += "📊 **Список игроков:**\n"
+    text += f"⚙️ Авто-проигрыш при ставке от: **${auto_loss_limit}**\n\n📊 **Список игроков:**\n"
 
     for u_id, u_data in users_db.items():
         status_tag = ""
-        if u_data["is_deleted"]:
-            status_tag = " [❌ УДАЛЕН]"
-        elif u_data["banned_until"] and datetime.now() < u_data["banned_until"]:
-            status_tag = " [⛔ В БАНЕ]"
-
+        if u_data["is_deleted"]: status_tag = " [❌ УДАЛЕН]"
+        elif u_data["banned_until"] and datetime.now() < u_data["banned_until"]: status_tag = " [⛔ В БАНЕ]"
         text += f"👤 ID: `{u_id}`{status_tag} | 💵 **${u_data['balance']}** | 😈 **{u_data['forced_losses']} игр**\n"
 
-    text += "\n**Команды управления игроками:**\n"
-    text += "• `/give ID СУММА` — выдать баланс\n"
-    text += "• `/take ID СУММА` — забрать баланс\n"
+    text += "\n**Команды админа:**\n"
+    text += "• `/give ID СУММА` | `/take ID СУММА`\n"
     text += "• `/rig ID ИГР` — подкрутить проигрыши\n"
-    text += "• `/ban ID МИНУТЫ` — забанить на время\n"
-    text += "• `/unban ID` — разбанить игрока\n"
-    text += "• `/delete_user ID` — полностью удалить пользователя\n"
-    text += "• `/setlimit СУММА` — порог авто-слива\n"
-    text += "• `/bc ТЕКСТ` — рассылка всем\n"
-
+    text += "• `/ban ID МИНУТЫ` | `/unban ID` | `/delete_user ID`\n"
+    text += "• `/setlimit СУММА` | `/bc ТЕКСТ`\n"
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("ban"))
@@ -263,14 +257,11 @@ async def ban_user(message: types.Message):
         _, target_id, minutes = message.text.split()
         data = get_user_data(int(target_id))
         data["banned_until"] = datetime.now() + timedelta(minutes=int(minutes))
-        
-        try:
-            await bot.send_message(int(target_id), f"⛔ **Вы получили временную блокировку в игре на {minutes} мин.**")
+        save_db()
+        try: await bot.send_message(int(target_id), f"⛔ **Вы получили временную блокировку в игре на {minutes} мин.**")
         except: pass
-
         await message.answer(f"✅ Пользователь `{target_id}` заблокирован на **{minutes}** минут!", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Ошибка! Используйте: `/ban ID МИНУТЫ`", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/ban ID МИНУТЫ`", parse_mode="Markdown")
 
 @dp.message(Command("unban"))
 async def unban_user(message: types.Message):
@@ -280,14 +271,11 @@ async def unban_user(message: types.Message):
         data = get_user_data(int(target_id))
         data["banned_until"] = None
         data["is_deleted"] = False
-        
-        try:
-            await bot.send_message(int(target_id), "✅ **Ваш аккаунт был разблокирован! Снова добро пожаловать в игру.**")
+        save_db()
+        try: await bot.send_message(int(target_id), "✅ **Ваш аккаунт был разблокирован!**")
         except: pass
-
         await message.answer(f"✅ Пользователь `{target_id}` успешно разбанен!", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Ошибка! Используйте: `/unban ID`", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/unban ID`", parse_mode="Markdown")
 
 @dp.message(Command("delete_user"))
 async def delete_user(message: types.Message):
@@ -296,14 +284,11 @@ async def delete_user(message: types.Message):
         _, target_id = message.text.split()
         data = get_user_data(int(target_id))
         data["is_deleted"] = True
-        
-        try:
-            await bot.send_message(int(target_id), "❌ **Ваш профиль был полностью удален администратором.**")
+        save_db()
+        try: await bot.send_message(int(target_id), "❌ **Ваш профиль был полностью удален администратором.**")
         except: pass
-
-        await message.answer(f"🗑 Пользователь `{target_id}` заблокирован и помечен как удаленный!", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Ошибка! Используйте: `/delete_user ID`", parse_mode="Markdown")
+        await message.answer(f"🗑 Пользователь `{target_id}` удален!", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/delete_user ID`", parse_mode="Markdown")
 
 @dp.message(Command("give"))
 async def give_money(message: types.Message):
@@ -312,9 +297,9 @@ async def give_money(message: types.Message):
         _, target_id, amount = message.text.split()
         data = get_user_data(int(target_id))
         data["balance"] += int(amount)
+        save_db()
         await message.answer(f"✅ Выдано **${amount}** пользователю `{target_id}`", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Ошибка! Используйте: `/give ID СУММА`", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/give ID СУММА`", parse_mode="Markdown")
 
 @dp.message(Command("take"))
 async def take_money(message: types.Message):
@@ -323,9 +308,9 @@ async def take_money(message: types.Message):
         _, target_id, amount = message.text.split()
         data = get_user_data(int(target_id))
         data["balance"] -= int(amount)
+        save_db()
         await message.answer(f"✅ Забрано **${amount}** у пользователя `{target_id}`", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Ошибка! Используйте: `/take ID СУММА`", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/take ID СУММА`", parse_mode="Markdown")
 
 @dp.message(Command("rig"))
 async def set_rig(message: types.Message):
@@ -334,9 +319,9 @@ async def set_rig(message: types.Message):
         _, target_id, games_count = message.text.split()
         data = get_user_data(int(target_id))
         data["forced_losses"] = int(games_count)
+        save_db()
         await message.answer(f"😈 Пользователь `{target_id}` проиграет следующие **{games_count}** игр!", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Ошибка! Используйте: `/rig ID КОЛИЧЕСТВО_ИГР`", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/rig ID КОЛИЧЕСТВО_ИГР`", parse_mode="Markdown")
 
 @dp.message(Command("setlimit"))
 async def change_limit(message: types.Message):
@@ -346,8 +331,7 @@ async def change_limit(message: types.Message):
         _, limit = message.text.split()
         auto_loss_limit = int(limit)
         await message.answer(f"⚙️ Ставки от **${limit}** теперь автоматически проигрышные!", parse_mode="Markdown")
-    except:
-        await message.answer("❌ Ошибка! Используйте: `/setlimit СУММА`", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/setlimit СУММА`", parse_mode="Markdown")
 
 @dp.message(Command("bc"))
 async def broadcast(message: types.Message):
@@ -363,11 +347,10 @@ async def broadcast(message: types.Message):
             await bot.send_message(u_id, f"📢 **АНОНС LOMTIK GAME:**\n\n{text_to_send}", parse_mode="Markdown")
             count += 1
             await asyncio.sleep(0.05)
-        except:
-            pass
+        except: pass
     await message.answer(f"✅ Сообщение отправлено **{count}** пользователям!")
 
-# --- ИГРОВАЯ ЛОГИКА ---
+# --- ИГРЫ ---
 @dp.callback_query(F.data.startswith("game_"))
 async def choose_bet(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
@@ -375,7 +358,6 @@ async def choose_bet(callback: types.CallbackQuery, state: FSMContext):
     if not can_play:
         await callback.answer(msg, show_alert=True)
         return
-
     game_code = callback.data.split("_")[1]
     await callback.message.edit_text("💰 **Выбери сумму ставки:**", reply_markup=bet_keyboard(game_code), parse_mode="Markdown")
 
@@ -390,17 +372,14 @@ async def guess_game_start(callback: types.CallbackQuery):
     bet = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     data = get_user_data(user_id)
-    
     if data["balance"] < bet:
         await callback.answer("❌ Недостаточно средств!", show_alert=True)
         return
 
     user_bets[user_id] = bet
     builder = InlineKeyboardBuilder()
-    for num in range(1, 6):
-        builder.button(text=f"🔢 {num}", callback_data=f"play_guess_{num}")
+    for num in range(1, 6): builder.button(text=f"🔢 {num}", callback_data=f"play_guess_{num}")
     builder.adjust(5)
-    
     await callback.message.edit_text(f"🎯 **Угадай число**\n\nВаша ставка: **${bet}**\nВыбери число от 1 до 5:", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("play_guess_"))
@@ -415,32 +394,19 @@ async def guess_game_result(callback: types.CallbackQuery):
     user_choice = int(callback.data.split("_")[2])
 
     force_loss = should_user_lose(user_id, bet)
-
-    if force_loss:
-        options = [n for n in range(1, 6) if n != user_choice]
-        secret_num = random.choice(options)
-    else:
-        secret_num = random.randint(1, 5)
+    if force_loss: secret_num = random.choice([n for n in range(1, 6) if n != user_choice])
+    else: secret_num = random.randint(1, 5)
 
     data = get_user_data(user_id)
     if user_choice == secret_num:
         win = int(bet * 3)
         data["balance"] += win - bet
-        res_text = (
-            f"🎉 **ПОБЕДА!** 🎉\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"Загадано: **{secret_num}** | Ваш выбор: **{user_choice}**\n"
-            f"🟢 Выигрыш: **+${win}**"
-        )
+        res_text = f"🎉 **ПОБЕДА!** 🎉\n━━━━━━━━━━━━━━━\nЗагадано: **{secret_num}** | Ваш выбор: **{user_choice}**\n🟢 Выигрыш: **+${win}**"
     else:
         data["balance"] -= bet
-        res_text = (
-            f"💥 **ПРОИГРЫШ**\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"Загадано: **{secret_num}** | Ваш выбор: **{user_choice}**\n"
-            f"🔴 Списано: **-${bet}**"
-        )
+        res_text = f"💥 **ПРОИГРЫШ**\n━━━━━━━━━━━━━━━\nЗагадано: **{secret_num}** | Ваш выбор: **{user_choice}**\n🔴 Списано: **-${bet}**"
 
+    save_db()
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
     await callback.message.edit_text(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -455,7 +421,6 @@ async def hl_game_start(callback: types.CallbackQuery):
     bet = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     data = get_user_data(user_id)
-    
     if data["balance"] < bet:
         await callback.answer("❌ Недостаточно средств!", show_alert=True)
         return
@@ -465,7 +430,6 @@ async def hl_game_start(callback: types.CallbackQuery):
     builder.button(text="📉 Меньше (1-3)", callback_data="play_hl_low")
     builder.button(text="📈 Больше (4-6)", callback_data="play_hl_high")
     builder.adjust(2)
-    
     await callback.message.edit_text(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nКуда упадет кость?", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("play_hl_"))
@@ -480,14 +444,11 @@ async def hl_game_result(callback: types.CallbackQuery):
     choice = callback.data.split("_")[2]
 
     force_loss = should_user_lose(user_id, bet)
-
     dice_msg = await callback.message.answer_dice(emoji="🎲")
     await asyncio.sleep(2)
 
-    if force_loss:
-        dice_val = random.randint(4, 6) if choice == "low" else random.randint(1, 3)
-    else:
-        dice_val = dice_msg.dice.value
+    if force_loss: dice_val = random.randint(4, 6) if choice == "low" else random.randint(1, 3)
+    else: dice_val = dice_msg.dice.value
 
     is_win = (choice == "low" and dice_val <= 3) or (choice == "high" and dice_val >= 4)
     data = get_user_data(user_id)
@@ -495,21 +456,12 @@ async def hl_game_result(callback: types.CallbackQuery):
     if is_win:
         win = int(bet * 1.8)
         data["balance"] += win - bet
-        res_text = (
-            f"🎉 **ОТЛИЧНЫЙ БРОСОК!** 🎉\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🎲 Выпало: **{dice_val}**\n"
-            f"🟢 Выигрыш: **+${win}**"
-        )
+        res_text = f"🎉 **ОТЛИЧНЫЙ БРОСОК!** 🎉\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{dice_val}**\n🟢 Выигрыш: **+${win}**"
     else:
         data["balance"] -= bet
-        res_text = (
-            f"💥 **НЕ УГАДАЛ**\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🎲 Выпало: **{dice_val}**\n"
-            f"🔴 Проигрыш: **-${bet}**"
-        )
+        res_text = f"💥 **НЕ УГАДАЛ**\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{dice_val}**\n🔴 Проигрыш: **-${bet}**"
 
+    save_db()
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
     await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -524,7 +476,6 @@ async def even_game_start(callback: types.CallbackQuery):
     bet = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     data = get_user_data(user_id)
-    
     if data["balance"] < bet:
         await callback.answer("❌ Недостаточно средств!", show_alert=True)
         return
@@ -534,7 +485,6 @@ async def even_game_start(callback: types.CallbackQuery):
     builder.button(text="🔴 Четное", callback_data="play_even_even")
     builder.button(text="🔵 Нечетное", callback_data="play_even_odd")
     builder.adjust(2)
-    
     await callback.message.edit_text(f"🎲 **Четное или Нечетное**\n\nСтавка: **${bet}**\nСделай выбор:", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("play_even_"))
@@ -549,16 +499,11 @@ async def even_game_result(callback: types.CallbackQuery):
     choice = callback.data.split("_")[2]
 
     force_loss = should_user_lose(user_id, bet)
-
     dice_msg = await callback.message.answer_dice(emoji="🎲")
     await asyncio.sleep(2)
 
-    if force_loss:
-        odds = [1, 3, 5]
-        evens = [2, 4, 6]
-        dice_val = random.choice(odds) if choice == "even" else random.choice(evens)
-    else:
-        dice_val = dice_msg.dice.value
+    if force_loss: dice_val = random.choice([1, 3, 5]) if choice == "even" else random.choice([2, 4, 6])
+    else: dice_val = dice_msg.dice.value
 
     is_even = dice_val % 2 == 0
     is_win = (choice == "even" and is_even) or (choice == "odd" and not is_even)
@@ -567,25 +512,17 @@ async def even_game_result(callback: types.CallbackQuery):
     if is_win:
         win = int(bet * 1.8)
         data["balance"] += win - bet
-        res_text = (
-            f"🎉 **ТОЧНО В ЦЕЛЬ!** 🎉\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🎲 Выпало: **{dice_val}**\n"
-            f"🟢 Выигрыш: **+${win}**"
-        )
+        res_text = f"🎉 **ТОЧНО В ЦЕЛЬ!** 🎉\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{dice_val}**\n🟢 Выигрыш: **+${win}**"
     else:
         data["balance"] -= bet
-        res_text = (
-            f"💥 **НЕ УГАДАЛ**\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🎲 Выпало: **{dice_val}**\n"
-            f"🔴 Проигрыш: **-${bet}**"
-        )
+        res_text = f"💥 **НЕ УГАДАЛ**\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{dice_val}**\n🔴 Проигрыш: **-${bet}**"
 
+    save_db()
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
     await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
 async def main():
+    load_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
