@@ -237,4 +237,22 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())# Команда для просмотра зарегистрированных игроков
+@dp.message(Command("admin"))
+async def admin_stats(message: Message):
+    # Замените 123456789 на ваш личный Telegram ID (чтобы статистику видели только вы)
+    ADMIN_ID = 123456789 
+    
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У вас нет доступа к этой команде.")
+        return
+
+    if not user_data:
+        await message.answer("Пока никто не играл.")
+        return
+
+    text = "📊 **Список игроков:**\n\n"
+    for user_id, data in user_data.items():
+        text += f"👤 ID: `{user_id}` | Уровень: {data.get('level', 1)} | Очки: {data.get('score', 0)}\n"
+    
+    await message.answer(text, parse_mode="Markdown")
