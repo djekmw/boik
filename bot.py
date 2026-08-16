@@ -246,26 +246,51 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
 # --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
-    text = "🛠 **ПАНЕЛЬ АДМИНИСТРАТОРА LOMTIK GAME**\n\n"
-    text += f"⚙️ Авто-проигрыш при ставке от: **${auto_loss_limit}**\n\n📊 **Список игроков:**\n"
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    text = "🛠 **ПАНЕЛЬ АДМИНИСТРАТОРА LOMTIK GAME**\n"
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text += f"⚙️ **Авто-слив при ставке от:** `${auto_loss_limit}`\n\n"
+    
+    text += "📊 **СПИСОК ИГРОКОВ:**\n"
+    if not users_db:
+        text += "└ *Игроков пока нет*\n\n"
+    else:
+        for u_id, u_data in users_db.items():
+            status_tag = ""
+            if u_data.get("is_deleted"): 
+                status_tag = " ❌ [УДАЛЕН]"
+            elif u_data.get("banned_until") and datetime.now() < u_data["banned_until"]: 
+                status_tag = " ⛔ [В БАНЕ]"
+            
+            wins = u_data.get("forced_wins", 0)
+            losses = u_data.get("forced_losses", 0)
+            
+            text += (
+                f"👤 **ID:** `{u_id}`{status_tag}\n"
+                f" ├ 💵 Баланс: **${u_data['balance']}**\n"
+                f" ├ 👑 Подкручено побед: **{wins}**\n"
+                f" └ 😈 Подкручено сливов: **{losses}**\n\n"
+            )
 
-    for u_id, u_data in users_db.items():
-        status_tag = ""
-        if u_data["is_deleted"]: status_tag = " [❌ УДАЛЕН]"
-        elif u_data["banned_until"] and datetime.now() < u_data["banned_until"]: status_tag = " [⛔ В БАНЕ]"
-        
-        wins = u_data.get("forced_wins", 0)
-        losses = u_data.get("forced_losses", 0)
-        
-        text += f"👤 ID: `{u_id}`{status_tag} | 💵 **${u_data['balance']}** | 👑 Поб: **{wins}** | 😈 Слив: **{losses}**\n"
+    text += "🎮 **УПРАВЛЕНИЕ ПОДКТРУТКОЙ:**\n"
+    text += "• `/rig_win ID ИГР` — гарантированные победы\n"
+    text += "• `/rig_loss ID ИГР` — гарантированные сливы\n\n"
 
-    text += "\n**Команды управления:**\n"
-    text += "• `/give ID СУММА` | `/take ID СУММА`\n"
-    text += "• `/rig_win ID ИГР` — подкрутка побед\n"
-    text += "• `/rig_loss ID ИГР` (или `/rig`) — подкрутка сливов\n"
-    text += "• `/ban ID МИНУТЫ` | `/unban ID` | `/delete_user ID`\n"
-    text += "• `/setlimit СУММА` | `/bc ТЕКСТ`\n"
+    text += "💰 **УПРАВЛЕНИЕ БАЛАНСОМ:**\n"
+    text += "• `/give ID СУММА` — выдать деньги\n"
+    text += "• `/take ID СУММА` — забрать деньги\n"
+    text += "• `/setlimit СУММА` — установить лимит авто-слива\n\n"
+
+    text += "⛔ **БЛОКИРОВКИ И УДАЛЕНИЕ:**\n"
+    text += "• `/ban ID МИНУТЫ` — забанить на время\n"
+    text += "• `/unban ID` — разбанить игрока\n"
+    text += "• `/delete_user ID` — полностью удалить профиль\n\n"
+
+    text += "📢 **ОБЩИЕ КОМАНДЫ:**\n"
+    text += "• `/bc ТЕКСТ` — сделать рассылку всем игрокам\n"
+
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("rig_win"))
@@ -480,7 +505,6 @@ async def hl_game_result(callback: types.CallbackQuery):
 
     rig_mode = get_rig_mode(user_id, bet)
 
-    # Мгновенный незаметный переброс кубика до нужного результата
     while True:
         dice_msg = await callback.message.answer_dice(emoji="🎲")
         dice_val = dice_msg.dice.value
@@ -550,7 +574,6 @@ async def even_game_result(callback: types.CallbackQuery):
 
     rig_mode = get_rig_mode(user_id, bet)
 
-    # Мгновенный незаметный переброс кубика до нужного результата
     while True:
         dice_msg = await callback.message.answer_dice(emoji="🎲")
         dice_val = dice_msg.dice.value
