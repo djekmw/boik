@@ -20,7 +20,7 @@ users_db = {}
 user_bets = {}
 auto_loss_limit = 300
 
-# --- ФУНКЦИИ СОХРАНЕНИЯ И ZАГРУЗКИ ДАННЫХ ---
+# --- СОХРАНЕНИЕ И ЗАГРУЗКА БАЗЫ ДАННЫХ ---
 def load_db():
     global users_db
     if os.path.exists(DB_FILE):
@@ -56,10 +56,16 @@ def get_user_data(user_id: int):
         users_db[user_id] = {
             "balance": 1000, 
             "forced_losses": 0,
+            "forced_wins": 0,
             "is_deleted": False,
             "banned_until": None
         }
         save_db()
+    
+    # Резервная проверка для старых записей без forced_wins
+    if "forced_wins" not in users_db[user_id]:
+        users_db[user_id]["forced_wins"] = 0
+        
     return users_db[user_id]
 
 def check_access(user_id: int) -> tuple[bool, str]:
@@ -85,16 +91,28 @@ def get_status(balance: int) -> str:
     elif balance < 10000: return "🥇 VIP-Игрок"
     else: return "💎 Магнат LOMTIK"
 
-def should_user_lose(user_id: int, current_bet: int) -> bool:
+def get_rig_mode(user_id: int, current_bet: int) -> str:
+    """Возвращает: 'win' (победа), 'loss' (проигрыш) или 'none' (честная игра)"""
     global auto_loss_limit
     user = get_user_data(user_id)
-    if user["forced_losses"] > 0:
+    
+    # 1. Приоритет за подкруткой побед
+    if user.get("forced_wins", 0) > 0:
+        user["forced_wins"] -= 1
+        save_db()
+        return "win"
+    
+    # 2. Подкрутка проигрышей
+    if user.get("forced_losses", 0) > 0:
         user["forced_losses"] -= 1
         save_db()
-        return True
+        return "loss"
+    
+    # 3. Лимит на крупную ставку
     if current_bet >= auto_loss_limit:
-        return True
-    return False
+        return "loss"
+        
+    return "none"
 
 # --- КЛАВИАТУРЫ ---
 def main_keyboard():
@@ -241,14 +259,42 @@ async def admin_panel(message: types.Message):
         status_tag = ""
         if u_data["is_deleted"]: status_tag = " [❌ УДАЛЕН]"
         elif u_data["banned_until"] and datetime.now() < u_data["banned_until"]: status_tag = " [⛔ В БАНЕ]"
-        text += f"👤 ID: `{u_id}`{status_tag} | 💵 **${u_data['balance']}** | 😈 **{u_data['forced_losses']} игр**\n"
+        
+        wins = u_data.get("forced_wins", 0)
+        losses = u_data.get("forced_losses", 0)
+        
+        text += f"👤 ID: `{u_id}`{status_tag} | 💵 **${u_data['balance']}** | 👑 Поб: **{wins}** | 😈 Слив: **{losses}**\n"
 
-    text += "\n**Команды админа:**\n"
+    text += "\n**Команды управления:**\n"
     text += "• `/give ID СУММА` | `/take ID СУММА`\n"
-    text += "• `/rig ID ИГР` — подкрутить проигрыши\n"
+    text += "• `/rig_win ID ИГР` — подкрутка побед\n"
+    text += "• `/rig_loss ID ИГР` (или `/rig`) — подкрутка сливов\n"
     text += "• `/ban ID МИНУТЫ` | `/unban ID` | `/delete_user ID`\n"
     text += "• `/setlimit СУММА` | `/bc ТЕКСТ`\n"
     await message.answer(text, parse_mode="Markdown")
+
+@dp.message(Command("rig_win"))
+async def set_rig_win(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        _, target_id, games_count = message.text.split()
+        data = get_user_data(int(target_id))
+        data["forced_wins"] = int(games_count)
+        save_db()
+        await message.answer(f"👑 Пользователь `{target_id}` **ВЫИГРАЕТ** следующие **{games_count}** игр!", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/rig_win ID КОЛИЧЕСТВО_ИГР`", parse_mode="Markdown")
+
+@dp.message(Command("rig_loss"))
+@dp.message(Command("rig"))
+async def set_rig_loss(message: types.Message):
+    if message.from_user.id != ADMIN_ID: return
+    try:
+        _, target_id, games_count = message.text.split()
+        data = get_user_data(int(target_id))
+        data["forced_losses"] = int(games_count)
+        save_db()
+        await message.answer(f"😈 Пользователь `{target_id}` **ПРОИГРАЕТ** следующие **{games_count}** игр!", parse_mode="Markdown")
+    except: await message.answer("❌ Используйте: `/rig_loss ID КОЛИЧЕСТВО_ИГР`", parse_mode="Markdown")
 
 @dp.message(Command("ban"))
 async def ban_user(message: types.Message):
@@ -311,17 +357,6 @@ async def take_money(message: types.Message):
         save_db()
         await message.answer(f"✅ Забрано **${amount}** у пользователя `{target_id}`", parse_mode="Markdown")
     except: await message.answer("❌ Используйте: `/take ID СУММА`", parse_mode="Markdown")
-
-@dp.message(Command("rig"))
-async def set_rig(message: types.Message):
-    if message.from_user.id != ADMIN_ID: return
-    try:
-        _, target_id, games_count = message.text.split()
-        data = get_user_data(int(target_id))
-        data["forced_losses"] = int(games_count)
-        save_db()
-        await message.answer(f"😈 Пользователь `{target_id}` проиграет следующие **{games_count}** игр!", parse_mode="Markdown")
-    except: await message.answer("❌ Используйте: `/rig ID КОЛИЧЕСТВО_ИГР`", parse_mode="Markdown")
 
 @dp.message(Command("setlimit"))
 async def change_limit(message: types.Message):
@@ -393,9 +428,14 @@ async def guess_game_result(callback: types.CallbackQuery):
     bet = user_bets.get(user_id, 50)
     user_choice = int(callback.data.split("_")[2])
 
-    force_loss = should_user_lose(user_id, bet)
-    if force_loss: secret_num = random.choice([n for n in range(1, 6) if n != user_choice])
-    else: secret_num = random.randint(1, 5)
+    rig_mode = get_rig_mode(user_id, bet)
+    
+    if rig_mode == "win":
+        secret_num = user_choice  # Гарантированная победа
+    elif rig_mode == "loss":
+        secret_num = random.choice([n for n in range(1, 6) if n != user_choice])  # Гарантированный слив
+    else:
+        secret_num = random.randint(1, 5)  # Честная игра
 
     data = get_user_data(user_id)
     if user_choice == secret_num:
@@ -430,7 +470,7 @@ async def hl_game_start(callback: types.CallbackQuery):
     builder.button(text="📉 Меньше (1-3)", callback_data="play_hl_low")
     builder.button(text="📈 Больше (4-6)", callback_data="play_hl_high")
     builder.adjust(2)
-    await callback.message.edit_text(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nКуда упадет кость?", parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.message.edit_text(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nКуда упадет кость?", parse_mode="Markdown", reply_markup=bet_keyboard("hl"), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("play_hl_"))
 async def hl_game_result(callback: types.CallbackQuery):
@@ -443,12 +483,28 @@ async def hl_game_result(callback: types.CallbackQuery):
     bet = user_bets.get(user_id, 50)
     choice = callback.data.split("_")[2]
 
-    force_loss = should_user_lose(user_id, bet)
-    dice_msg = await callback.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(2)
+    rig_mode = get_rig_mode(user_id, bet)
 
-    if force_loss: dice_val = random.randint(4, 6) if choice == "low" else random.randint(1, 3)
-    else: dice_val = dice_msg.dice.value
+    while True:
+        dice_msg = await callback.message.answer_dice(emoji="🎲")
+        dice_val = dice_msg.dice.value
+
+        if rig_mode == "win":
+            # Ищем выигрышное число
+            is_valid = (choice == "low" and dice_val <= 3) or (choice == "high" and dice_val >= 4)
+        elif rig_mode == "loss":
+            # Ищем проигрышное число
+            is_valid = (choice == "low" and dice_val >= 4) or (choice == "high" and dice_val <= 3)
+        else:
+            is_valid = True
+
+        if is_valid:
+            break
+        else:
+            await dice_msg.delete()
+            await asyncio.sleep(0.1)
+
+    await asyncio.sleep(2)
 
     is_win = (choice == "low" and dice_val <= 3) or (choice == "high" and dice_val >= 4)
     data = get_user_data(user_id)
@@ -498,12 +554,29 @@ async def even_game_result(callback: types.CallbackQuery):
     bet = user_bets.get(user_id, 50)
     choice = callback.data.split("_")[2]
 
-    force_loss = should_user_lose(user_id, bet)
-    dice_msg = await callback.message.answer_dice(emoji="🎲")
-    await asyncio.sleep(2)
+    rig_mode = get_rig_mode(user_id, bet)
 
-    if force_loss: dice_val = random.choice([1, 3, 5]) if choice == "even" else random.choice([2, 4, 6])
-    else: dice_val = dice_msg.dice.value
+    while True:
+        dice_msg = await callback.message.answer_dice(emoji="🎲")
+        dice_val = dice_msg.dice.value
+        is_even = dice_val % 2 == 0
+
+        if rig_mode == "win":
+            # Ищем число под победу
+            is_valid = (choice == "even" and is_even) or (choice == "odd" and not is_even)
+        elif rig_mode == "loss":
+            # Ищем число под проигрыш
+            is_valid = (choice == "even" and not is_even) or (choice == "odd" and is_even)
+        else:
+            is_valid = True
+
+        if is_valid:
+            break
+        else:
+            await dice_msg.delete()
+            await asyncio.sleep(0.1)
+
+    await asyncio.sleep(2)
 
     is_even = dice_val % 2 == 0
     is_win = (choice == "even" and is_even) or (choice == "odd" and not is_even)
@@ -521,8 +594,16 @@ async def even_game_result(callback: types.CallbackQuery):
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
     await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
+# --- СТАРТ БОТА С УВЕДОМЛЕНИЕМ ---
+async def on_startup(bot: Bot):
+    try:
+        await bot.send_message(ADMIN_ID, "готово босс")
+    except Exception as e:
+        print(f"Ошибка отправки сообщения админу: {e}")
+
 async def main():
     load_db()
+    dp.startup.register(on_startup)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
