@@ -1,6 +1,5 @@
 import random
 import asyncio
-import sqlite3
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -11,76 +10,25 @@ ADMIN_ID = 7587884784  # Ваш Telegram ID
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
-def init_db():
-    conn = sqlite3.connect("casino.db")
-    cursor = conn.cursor()
-    # Таблица пользователей
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            balance INTEGER DEFAULT 1000,
-            forced_losses INTEGER DEFAULT 0
-        )
-    """)
-    # Таблица глобальных настроек админа
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value INTEGER
-        )
-    """)
-    # Значение порога ставки по умолчанию ($300)
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_loss_limit', 300)")
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def db_query(query, params=(), fetchone=False, fetchall=False, commit=False):
-    conn = sqlite3.connect("casino.db")
-    cursor = conn.cursor()
-    cursor.execute(query, params)
-    data = None
-    if fetchone:
-        data = cursor.fetchone()
-    elif fetchall:
-        data = cursor.fetchall()
-    if commit:
-        conn.commit()
-    conn.close()
-    return data
+# Хранилище в памяти (без конфликтов с файловой системой)
+users_db = {}
+user_bets = {}
+auto_loss_limit = 300
 
 def get_user_data(user_id: int):
-    user = db_query("SELECT balance, forced_losses FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if not user:
-        db_query("INSERT INTO users (user_id, balance, forced_losses) VALUES (?, 1000, 0)", (user_id,), commit=True)
-        return {"balance": 1000, "forced_losses": 0}
-    return {"balance": user[0], "forced_losses": user[1]}
+    if user_id not in users_db:
+        users_db[user_id] = {"balance": 1000, "forced_losses": 0}
+    return users_db[user_id]
 
-def update_balance(user_id: int, amount: int):
-    db_query("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id), commit=True)
-
-def get_auto_loss_limit():
-    res = db_query("SELECT value FROM settings WHERE key = 'auto_loss_limit'", fetchone=True)
-    return res[0] if res else 300
-
-def set_auto_loss_limit(limit: int):
-    db_query("UPDATE settings SET value = ? WHERE key = 'auto_loss_limit'", (limit,), commit=True)
-
-# Проверка: должен ли игрок проиграть в этом раунде
 def should_user_lose(user_id: int, current_bet: int) -> bool:
+    global auto_loss_limit
     user = get_user_data(user_id)
-    forced_losses = user["forced_losses"]
-    limit = get_auto_loss_limit()
-
-    # 1. Принудительные проигрыши от админа
-    if forced_losses > 0:
-        db_query("UPDATE users SET forced_losses = forced_losses - 1 WHERE user_id = ?", (user_id,), commit=True)
+    
+    if user["forced_losses"] > 0:
+        user["forced_losses"] -= 1
         return True
 
-    # 2. Если ставка выше лимита
-    if current_bet >= limit:
+    if current_bet >= auto_loss_limit:
         return True
 
     return False
@@ -103,8 +51,6 @@ def bet_keyboard(game_code: str):
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
-user_bets = {}
-
 # --- ОСНОВНЫЕ КОМАНДЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -126,27 +72,24 @@ async def check_balance(callback: types.CallbackQuery):
     data = get_user_data(callback.from_user.id)
     await callback.answer(f"Твой баланс: ${data['balance']}", show_alert=True)
 
-# --- РАСШИРЕННАЯ АДМИНКА ---
+# --- АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    users = db_query("SELECT user_id, balance, forced_losses FROM users", fetchall=True)
-    limit = get_auto_loss_limit()
-
     text = "🛠 **ПАНЕЛЬ АДМИНИСТРАТОРА**\n\n"
-    text += f"⚙️ Авто-проигрыш при ставке от: **${limit}**\n\n"
+    text += f"⚙️ Авто-проигрыш при ставке от: **${auto_loss_limit}**\n\n"
     text += "📊 **Список игроков:**\n"
 
-    for u in users:
-        text += f"👤 ID: `{u[0]}` | Баланс: **${u[1]}** | Подкрутка: **{u[2]} игр**\n"
+    for u_id, u_data in users_db.items():
+        text += f"👤 ID: `{u_id}` | Баланс: **${u_data['balance']}** | Подкрутка: **{u_data['forced_losses']} игр**\n"
 
     text += "\n**Команды админа:**\n"
-    text += "• `/give ID СУММА` — выдать баланс (пример: `/give 12345 500`)\n"
-    text += "• `/take ID СУММА` — забрать баланс (пример: `/take 12345 300`)\n"
-    text += "• `/rig ID ИГР` — сделать N проигрышей подряд (пример: `/rig 12345 3`)\n"
-    text += "• `/setlimit СУММА` — авто-проигрыш при ставке >= СУММА (пример: `/setlimit 400`)\n"
+    text += "• `/give ID СУММА` — выдать баланс\n"
+    text += "• `/take ID СУММА` — забрать баланс\n"
+    text += "• `/rig ID ИГР` — сделать N проигрышей подряд\n"
+    text += "• `/setlimit СУММА` — авто-проигрыш при ставке >= СУММА\n"
     text += "• `/bc ТЕКСТ` — рассылка всем игрокам\n"
 
     await message.answer(text, parse_mode="Markdown")
@@ -156,7 +99,8 @@ async def give_money(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
     try:
         _, target_id, amount = message.text.split()
-        update_balance(int(target_id), int(amount))
+        data = get_user_data(int(target_id))
+        data["balance"] += int(amount)
         await message.answer(f"✅ Выдано ${amount} пользователю `{target_id}`", parse_mode="Markdown")
     except:
         await message.answer("❌ Ошибка! Используйте: `/give ID СУММА`", parse_mode="Markdown")
@@ -166,7 +110,8 @@ async def take_money(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
     try:
         _, target_id, amount = message.text.split()
-        update_balance(int(target_id), -int(amount))
+        data = get_user_data(int(target_id))
+        data["balance"] -= int(amount)
         await message.answer(f"✅ Забрано ${amount} у пользователя `{target_id}`", parse_mode="Markdown")
     except:
         await message.answer("❌ Ошибка! Используйте: `/take ID СУММА`", parse_mode="Markdown")
@@ -176,17 +121,19 @@ async def set_rig(message: types.Message):
     if message.from_user.id != ADMIN_ID: return
     try:
         _, target_id, games_count = message.text.split()
-        db_query("UPDATE users SET forced_losses = ? WHERE user_id = ?", (int(games_count), int(target_id)), commit=True)
+        data = get_user_data(int(target_id))
+        data["forced_losses"] = int(games_count)
         await message.answer(f"😈 Пользователь `{target_id}` проиграет следующие **{games_count}** игр!", parse_mode="Markdown")
     except:
         await message.answer("❌ Ошибка! Используйте: `/rig ID КОЛИЧЕСТВО_ИГР`", parse_mode="Markdown")
 
 @dp.message(Command("setlimit"))
 async def change_limit(message: types.Message):
+    global auto_loss_limit
     if message.from_user.id != ADMIN_ID: return
     try:
         _, limit = message.text.split()
-        set_auto_loss_limit(int(limit))
+        auto_loss_limit = int(limit)
         await message.answer(f"⚙️ Теперь ставки от **${limit}** будут автоматически проигрышными!", parse_mode="Markdown")
     except:
         await message.answer("❌ Ошибка! Используйте: `/setlimit СУММА`", parse_mode="Markdown")
@@ -199,18 +146,17 @@ async def broadcast(message: types.Message):
         await message.answer("❌ Введите текст для рассылки!")
         return
 
-    users = db_query("SELECT user_id FROM users", fetchall=True)
     count = 0
-    for u in users:
+    for u_id in users_db.keys():
         try:
-            await bot.send_message(u[0], f"📢 **Объявление:**\n\n{text_to_send}", parse_mode="Markdown")
+            await bot.send_message(u_id, f"📢 **Объявление:**\n\n{text_to_send}", parse_mode="Markdown")
             count += 1
             await asyncio.sleep(0.05)
         except:
             pass
     await message.answer(f"✅ Сообщение отправлено **{count}** пользователям!")
 
-# --- ИГРОВАЯ ЛОГИКА С ПОДКТРУТКОЙ ---
+# --- ИГРОВАЯ ЛОГИКА ---
 @dp.callback_query(F.data.startswith("game_"))
 async def choose_bet(callback: types.CallbackQuery):
     game_code = callback.data.split("_")[1]
@@ -244,21 +190,20 @@ async def guess_game_result(callback: types.CallbackQuery):
     force_loss = should_user_lose(user_id, bet)
 
     if force_loss:
-        # Генерируем число, отличающееся от выбора игрока
         options = [n for n in range(1, 6) if n != user_choice]
         secret_num = random.choice(options)
     else:
         secret_num = random.randint(1, 5)
 
+    data = get_user_data(user_id)
     if user_choice == secret_num:
         win = int(bet * 3)
-        update_balance(user_id, win - bet)
+        data["balance"] += win - bet
         res_text = f"🎉 **Победа!** Выпало число {secret_num}.\nТвой выигрыш: **+${win}**"
     else:
-        update_balance(user_id, -bet)
+        data["balance"] -= bet
         res_text = f"❌ **Проигрыш!** Было загадано число {secret_num}."
 
-    data = get_user_data(user_id)
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
     await callback.message.edit_text(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -298,16 +243,16 @@ async def hl_game_result(callback: types.CallbackQuery):
         dice_val = dice_msg.dice.value
 
     is_win = (choice == "low" and dice_val <= 3) or (choice == "high" and dice_val >= 4)
+    data = get_user_data(user_id)
 
     if is_win:
         win = int(bet * 1.8)
-        update_balance(user_id, win - bet)
+        data["balance"] += win - bet
         res_text = f"🎉 **Выигрыш!** Выпало {dice_val}.\nТвой плюс: **+${win}**"
     else:
-        update_balance(user_id, -bet)
+        data["balance"] -= bet
         res_text = f"❌ **Проигрыш!** Выпало {dice_val}."
 
-    data = get_user_data(user_id)
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
     await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -342,7 +287,6 @@ async def even_game_result(callback: types.CallbackQuery):
     await asyncio.sleep(2)
 
     if force_loss:
-        # Выбираем нечетное число, если игрок поставил на четное, и наоборот
         odds = [1, 3, 5]
         evens = [2, 4, 6]
         dice_val = random.choice(odds) if choice == "even" else random.choice(evens)
@@ -351,16 +295,16 @@ async def even_game_result(callback: types.CallbackQuery):
 
     is_even = dice_val % 2 == 0
     is_win = (choice == "even" and is_even) or (choice == "odd" and not is_even)
+    data = get_user_data(user_id)
 
     if is_win:
         win = int(bet * 1.8)
-        update_balance(user_id, win - bet)
+        data["balance"] += win - bet
         res_text = f"🎉 **Отлично!** Выпало {dice_val}.\nТвой выигрыш: **+${win}**"
     else:
-        update_balance(user_id, -bet)
+        data["balance"] -= bet
         res_text = f"❌ **Не угадал!** Выпало {dice_val}."
 
-    data = get_user_data(user_id)
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
     await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
