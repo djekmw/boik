@@ -62,7 +62,6 @@ def get_user_data(user_id: int):
         }
         save_db()
     
-    # Резервная проверка для старых записей без forced_wins
     if "forced_wins" not in users_db[user_id]:
         users_db[user_id]["forced_wins"] = 0
         
@@ -92,23 +91,19 @@ def get_status(balance: int) -> str:
     else: return "💎 Магнат LOMTIK"
 
 def get_rig_mode(user_id: int, current_bet: int) -> str:
-    """Возвращает: 'win' (победа), 'loss' (проигрыш) или 'none' (честная игра)"""
     global auto_loss_limit
     user = get_user_data(user_id)
     
-    # 1. Приоритет за подкруткой побед
     if user.get("forced_wins", 0) > 0:
         user["forced_wins"] -= 1
         save_db()
         return "win"
     
-    # 2. Подкрутка проигрышей
     if user.get("forced_losses", 0) > 0:
         user["forced_losses"] -= 1
         save_db()
         return "loss"
     
-    # 3. Лимит на крупную ставку
     if current_bet >= auto_loss_limit:
         return "loss"
         
@@ -431,11 +426,11 @@ async def guess_game_result(callback: types.CallbackQuery):
     rig_mode = get_rig_mode(user_id, bet)
     
     if rig_mode == "win":
-        secret_num = user_choice  # Гарантированная победа
+        secret_num = user_choice
     elif rig_mode == "loss":
-        secret_num = random.choice([n for n in range(1, 6) if n != user_choice])  # Гарантированный слив
+        secret_num = random.choice([n for n in range(1, 6) if n != user_choice])
     else:
-        secret_num = random.randint(1, 5)  # Честная игра
+        secret_num = random.randint(1, 5)
 
     data = get_user_data(user_id)
     if user_choice == secret_num:
@@ -470,7 +465,7 @@ async def hl_game_start(callback: types.CallbackQuery):
     builder.button(text="📉 Меньше (1-3)", callback_data="play_hl_low")
     builder.button(text="📈 Больше (4-6)", callback_data="play_hl_high")
     builder.adjust(2)
-    await callback.message.edit_text(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nКуда упадет кость?", parse_mode="Markdown", reply_markup=bet_keyboard("hl"), parse_mode="Markdown")
+    await callback.message.edit_text(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nКуда упадет кость?", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("play_hl_"))
 async def hl_game_result(callback: types.CallbackQuery):
@@ -485,15 +480,14 @@ async def hl_game_result(callback: types.CallbackQuery):
 
     rig_mode = get_rig_mode(user_id, bet)
 
+    # Мгновенный незаметный переброс кубика до нужного результата
     while True:
         dice_msg = await callback.message.answer_dice(emoji="🎲")
         dice_val = dice_msg.dice.value
 
         if rig_mode == "win":
-            # Ищем выигрышное число
             is_valid = (choice == "low" and dice_val <= 3) or (choice == "high" and dice_val >= 4)
         elif rig_mode == "loss":
-            # Ищем проигрышное число
             is_valid = (choice == "low" and dice_val >= 4) or (choice == "high" and dice_val <= 3)
         else:
             is_valid = True
@@ -556,16 +550,15 @@ async def even_game_result(callback: types.CallbackQuery):
 
     rig_mode = get_rig_mode(user_id, bet)
 
+    # Мгновенный незаметный переброс кубика до нужного результата
     while True:
         dice_msg = await callback.message.answer_dice(emoji="🎲")
         dice_val = dice_msg.dice.value
         is_even = dice_val % 2 == 0
 
         if rig_mode == "win":
-            # Ищем число под победу
             is_valid = (choice == "even" and is_even) or (choice == "odd" and not is_even)
         elif rig_mode == "loss":
-            # Ищем число под проигрыш
             is_valid = (choice == "even" and not is_even) or (choice == "odd" and is_even)
         else:
             is_valid = True
