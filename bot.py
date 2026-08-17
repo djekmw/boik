@@ -58,6 +58,10 @@ class BetState(StatesGroup):
     waiting_for_custom_bet = State()
 
 
+class BroadcastState(StatesGroup):
+    waiting_for_message = State()
+
+
 def get_user_data(user_id: int):
     if user_id not in users_db:
         users_db[user_id] = {
@@ -603,15 +607,19 @@ async def show_admin_panel(target: types.Message | types.CallbackQuery):
     text += "🎮 **УПРАВЛЕНИЕ ПОДКТРУТКОЙ:**\n"
     text += "• `/rig_win ID ИГР` — подкрутить победы\n"
     text += "• `/rig_loss ID ИГР` — подкрутить сливы\n\n"
+    text += "📢 **МАССОВАЯ РАССЫЛКА:**\n"
+    text += "• `/broadcast Текст` — отправить сообщение всем\n\n"
     text += "📜 **ПРОСМОТР ИСТОРИИ:**\n"
     text += "• `/history ID` — смотреть историю игрока\n\n"
     text += "💰 **УПРАВЛЕНИЕ БАЛАНСОМ:**\n"
     text += "• `/give ID СУММА` — выдать баланс\n"
     text += "• `/take ID СУММА` — списать баланс\n"
-    text += "• `/setlimit СУММА` — измерить порог авто-слива\n"
+    text += "• `/setlimit СУММА` — изменить порог авто-слива\n"
 
     builder = InlineKeyboardBuilder()
+    builder.button(text="📢 Сделать рассылку", callback_data="start_broadcast_cb")
     builder.button(text="🔄 Обновить данные", callback_data="refresh_admin")
+    builder.adjust(1)
 
     if isinstance(target, types.Message):
         await target.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
@@ -628,6 +636,66 @@ async def refresh_admin_callback(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     await show_admin_panel(callback)
+
+
+# --- ФУНКЦИОНАЛ РАССЫЛКИ ---
+@dp.callback_query(F.data == "start_broadcast_cb")
+async def start_broadcast_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await state.set_state(BroadcastState.waiting_for_message)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="refresh_admin")
+    await callback.message.edit_text("📢 **Введите текст сообщения для рассылки всем пользователям:**", parse_mode="Markdown", reply_markup=builder.as_markup())
+
+
+@dp.message(Command("broadcast"))
+async def broadcast_cmd(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) > 1:
+        text_to_send = args[1]
+        await send_broadcast_to_all(message, text_to_send)
+    else:
+        await state.set_state(BroadcastState.waiting_for_message)
+        builder = InlineKeyboardBuilder()
+        builder.button(text="❌ Отмена", callback_data="refresh_admin")
+        await message.answer("📢 **Введите текст сообщения для рассылки всем пользователям:**", parse_mode="Markdown", reply_markup=builder.as_markup())
+
+
+@dp.message(BroadcastState.waiting_for_message)
+async def process_broadcast_message(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+    await send_broadcast_to_all(message, message.text)
+
+
+async def send_broadcast_to_all(event: types.Message, broadcast_text: str):
+    success_count = 0
+    fail_count = 0
+    
+    status_msg = await event.answer("⏳ **Запуск рассылки...**", parse_mode="Markdown")
+
+    for u_id, u_data in users_db.items():
+        if u_data.get("is_deleted"):
+            continue
+        try:
+            await bot.send_message(chat_id=int(u_id), text=f"📢 **УВЕДОМЛЕНИЕ:**\n\n{broadcast_text}", parse_mode="Markdown")
+            success_count += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            fail_count += 1
+
+    report = (
+        "✅ **РАССЫЛКА ЗАВЕРШЕНА!**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"Успешно доставлено: **{success_count}**\n"
+        f"Не доставлено (блок): **{fail_count}**"
+    )
+    await status_msg.edit_text(report, parse_mode="Markdown")
 
 
 @dp.message(Command("history"))
