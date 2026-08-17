@@ -68,18 +68,35 @@ def get_user_data(user_id: int):
             "forced_wins": 0,
             "is_deleted": False,
             "banned_until": None,
-            "last_bonus": None
+            "last_bonus": None,
+            "history": []
         }
         save_db()
     
-    # Защита от отсутствующих полей
     u = users_db[user_id]
     u.setdefault("forced_wins", 0)
     u.setdefault("forced_losses", 0)
     u.setdefault("xp", 0)
     u.setdefault("level", 1)
     u.setdefault("last_bonus", None)
+    u.setdefault("history", [])
     return u
+
+
+def log_game(user_id: int, game_name: str, bet: int, result: str, outcome_amount: int):
+    user = get_user_data(user_id)
+    time_str = datetime.now().strftime("%d.%m %H:%M")
+    entry = {
+        "time": time_str,
+        "game": game_name,
+        "bet": bet,
+        "result": result,  # "WIN" или "LOSS"
+        "amount": outcome_amount
+    }
+    user["history"].append(entry)
+    if len(user["history"]) > 20:  # Храним последние 20 игр
+        user["history"] = user["history"][-20:]
+    save_db()
 
 
 def add_xp(user_id: int, amount: int):
@@ -88,7 +105,7 @@ def add_xp(user_id: int, amount: int):
     new_level = (user["xp"] // 100) + 1
     if new_level > user["level"]:
         user["level"] = new_level
-        user["balance"] += new_level * 100  # Бонус за уровень
+        user["balance"] += new_level * 100
         return True, new_level
     return False, user["level"]
 
@@ -191,7 +208,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"🏆 Статус: **{status}**\n"
         f"⭐ Опыт: **{data['xp']} XP**\n"
         f"💵 Баланс: **${data['balance']}**\n\n"
-        "🔥 Испытай свою удачу и прокачивай уровень! Выбери игру ниже:"
+        "🔥 Испытай свою удачу! Выбери игру ниже:"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -222,8 +239,7 @@ async def check_balance(callback: types.CallbackQuery, state: FSMContext):
         f"🆔 **ID:** `{callback.from_user.id}`\n"
         f"🏆 **Ранг:** {status}\n"
         f"⭐ **Опыт:** {data['xp']} XP\n"
-        f"💰 **Баланс:** ${data['balance']}\n\n"
-        f"💡 *Совет: за каждую игру вы получаете XP и повышаете уровень!*"
+        f"💰 **Баланс:** ${data['balance']}"
     )
     await callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -235,24 +251,21 @@ async def get_daily_bonus(callback: types.CallbackQuery):
     if not can_play:
         await callback.answer(msg, show_alert=True)
         return
-    
     data = get_user_data(user_id)
     now = datetime.now()
-    
     if data["last_bonus"]:
         next_bonus = data["last_bonus"] + timedelta(hours=24)
         if now < next_bonus:
             remaining = next_bonus - now
             hours = int(remaining.total_seconds() // 3600)
             minutes = int((remaining.total_seconds() % 3600) // 60)
-            await callback.answer(f"⏳ Следующий бонус доступен через: {hours}ч {minutes}мин", show_alert=True)
+            await callback.answer(f"⏳ Бонус будет через {hours}ч {minutes}мин", show_alert=True)
             return
 
     bonus_amount = random.randint(150, 400)
     data["balance"] += bonus_amount
     data["last_bonus"] = now
     save_db()
-    
     await callback.answer(f"🎁 Вы получили ежедневный бонус ${bonus_amount}!", show_alert=True)
     await check_balance(callback, None)
 
@@ -294,7 +307,7 @@ async def set_bet_value(callback: types.CallbackQuery):
         for num in range(1, 6):
             builder.button(text=f"🔢 {num}", callback_data=f"play_guess_{num}")
         builder.adjust(5)
-        await callback.message.edit_text(f"🎯 **Угадай число (1-5)**\n\nВаша ставка: **${bet}**\nВыбери число:", parse_mode="Markdown", reply_markup=builder.as_markup())
+        await callback.message.edit_text(f"🎯 **Угадай число (1-5)**\n\nСтавка: **${bet}**\nВыбери число:", parse_mode="Markdown", reply_markup=builder.as_markup())
     elif game_code == "hl":
         builder = InlineKeyboardBuilder()
         builder.button(text="📉 Меньше (1-3)", callback_data="play_hl_low")
@@ -339,7 +352,7 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     data = get_user_data(user_id)
     if data["balance"] < bet:
-        await message.answer(f"❌ Недостаточно средств! Твой баланс: **${data['balance']}**", parse_mode="Markdown")
+        await message.answer(f"❌ Недостаточно средств! Баланс: **${data['balance']}**", parse_mode="Markdown")
         return
     fsm_data = await state.get_data()
     game_code = fsm_data.get("game_code")
@@ -366,7 +379,7 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
         await message.answer(f"🎲 **Четное или Нечетное**\n\nСтавка: **${bet}**\nСделай выбор:", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 
-# --- ОБРАБОТЧИКИ ИГР С АНИМАЦИЕЙ ---
+# --- ОБРАБОТЧИКИ ИГР ---
 @dp.callback_query(F.data.startswith("play_guess_"))
 async def play_guess(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -384,7 +397,6 @@ async def play_guess(callback: types.CallbackQuery):
     chosen_num = int(callback.data.split("_")[2])
     rig_mode = get_rig_mode(user_id, bet)
 
-    # Анимация броска
     await callback.message.edit_text("🎲 *Бросаем кубик...*", parse_mode="Markdown")
     await asyncio.sleep(1.2)
 
@@ -401,9 +413,11 @@ async def play_guess(callback: types.CallbackQuery):
     if chosen_num == secret_num:
         win_amount = bet * 3
         user["balance"] += win_amount
+        log_game(user_id, "Угадай число", bet, "WIN", win_amount)
         res_text = f"🎉 **ПОБЕДА!** Выпало число **{secret_num}**!\n💰 Выигрыш: **+${win_amount}** (+15 XP)"
     else:
         user["balance"] -= bet
+        log_game(user_id, "Угадай число", bet, "LOSS", -bet)
         res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{secret_num}**.\n💸 Потеряно: **-${bet}** (+15 XP)"
 
     if leveled_up:
@@ -447,9 +461,11 @@ async def play_hl(callback: types.CallbackQuery):
     if is_win:
         win_amount = bet
         user["balance"] += win_amount
+        log_game(user_id, "Больше/Меньше", bet, "WIN", win_amount)
         res_text = f"🎉 **ПОБЕДА!** Выпало число **{dice}**!\n💰 Выигрыш: **+${win_amount}** (+10 XP)"
     else:
         user["balance"] -= bet
+        log_game(user_id, "Больше/Меньше", bet, "LOSS", -bet)
         res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{dice}**.\n💸 Потеряно: **-${bet}** (+10 XP)"
 
     if leveled_up:
@@ -493,9 +509,11 @@ async def play_even(callback: types.CallbackQuery):
     if is_win:
         win_amount = bet
         user["balance"] += win_amount
+        log_game(user_id, "Чет/Нечет", bet, "WIN", win_amount)
         res_text = f"🎉 **ПОБЕДА!** Выпало число **{dice}**!\n💰 Выигрыш: **+${win_amount}** (+10 XP)"
     else:
         user["balance"] -= bet
+        log_game(user_id, "Чет/Нечет", bet, "LOSS", -bet)
         res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{dice}**.\n💸 Потеряно: **-${bet}** (+10 XP)"
 
     if leveled_up:
@@ -540,12 +558,10 @@ async def show_admin_panel(target: types.Message | types.CallbackQuery):
     text += "🎮 **УПРАВЛЕНИЕ ПОДКТРУТКОЙ:**\n"
     text += "• `/rig_win ID ИГР` — подкрутить победы\n"
     text += "• `/rig_loss ID ИГР` — подкрутить сливы\n\n"
+    text += "📜 **ИСТОРИЯ ИГР:**\n"
+    text += "• `/history ID` — просмотр последних игр\n\n"
     text += "💰 **ФИНАНСЫ:**\n"
-    text += "• `/give ID СУММА` — выдать баланс\n"
-    text += "• `/take ID СУММА` — забрать баланс\n"
-    text += "• `/setlimit СУММА` — лимит авто-слива\n\n"
-    text += "⛔ **БАНЫ:**\n"
-    text += "• `/ban ID МИНУТЫ` | `/unban ID` | `/delete_user ID`\n"
+    text += "• `/give ID СУММА` | `/take ID СУММА` | `/setlimit СУММА`\n"
 
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Обновить данные", callback_data="refresh_admin")
@@ -565,6 +581,31 @@ async def refresh_admin_callback(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
     await show_admin_panel(callback)
+
+
+@dp.message(Command("history"))
+async def show_user_history(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        _, target_id = message.text.split()
+        data = get_user_data(int(target_id))
+        history = data.get("history", [])
+        
+        if not history:
+            await message.answer(f"📜 У пользователя `{target_id}` пока нет сыгранных игр.", parse_mode="Markdown")
+            return
+
+        msg_text = f"📜 **История последних игр (ID: `{target_id}`):**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        for h in reversed(history[-10:]):  # Показываем последние 10
+            tag = "✅ WIN" if h["result"] == "WIN" else "❌ LOSS"
+            sign = "+" if h["amount"] > 0 else ""
+            msg_text += f"🕒 `{h['time']}` | {h['game']}\n"
+            msg_text += f" └ Ставка: ${h['bet']} | Результат: **{tag} ({sign}${h['amount']})**\n\n"
+
+        await message.answer(msg_text, parse_mode="Markdown")
+    except Exception:
+        await message.answer("❌ Команда: `/history ID`", parse_mode="Markdown")
 
 
 @dp.message(Command("rig_win"))
