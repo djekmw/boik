@@ -547,34 +547,37 @@ async def hl_game_result(callback: types.CallbackQuery):
 
     rig_mode = get_rig_mode(user_id, bet)
 
+    low_nums = [1, 2, 3]
+    high_nums = [4, 5, 6]
+
+    if rig_mode == "win":
+        target_list = low_nums if choice == "low" else high_nums
+    elif rig_mode == "loss":
+        target_list = high_nums if choice == "low" else low_nums
+    else:
+        target_list = [1, 2, 3, 4, 5, 6]
+
+    dice_msg = None
     while True:
         dice_msg = await callback.message.answer_dice(emoji="🎲")
-        dice_val = dice_msg.dice.value
-
-        if rig_mode == "win":
-            is_valid = (choice == "low" and dice_val <= 3) or (choice == "high" and dice_val >= 4)
-        elif rig_mode == "loss":
-            is_valid = (choice == "low" and dice_val >= 4) or (choice == "high" and dice_val <= 3)
-        else:
-            is_valid = True
-
-        if is_valid:
+        if dice_msg.dice.value in target_list or rig_mode == "none":
             break
-        else:
-            await dice_msg.delete()
+        await dice_msg.delete()
+        await asyncio.sleep(0.2)
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(2.5)
 
-    is_win = (choice == "low" and dice_val <= 3) or (choice == "high" and dice_val >= 4)
+    actual_val = dice_msg.dice.value
+    is_win = (choice == "low" and actual_val <= 3) or (choice == "high" and actual_val >= 4)
     data = get_user_data(user_id)
 
     if is_win:
         win = int(bet * 1.8)
         data["balance"] += win - bet
-        res_text = f"🎉 **ОТЛИЧНЫЙ БРОСОК!** 🎉\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{dice_val}**\n🟢 Выигрыш: **+${win}**"
+        res_text = f"🎉 **ОТЛИЧНЫЙ БРОСОК!** 🎉\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{actual_val}**\n🟢 Выигрыш: **+${win}**"
     else:
         data["balance"] -= bet
-        res_text = f"💥 **НЕ УГАДАЛ**\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{dice_val}**\n🔴 Проигрыш: **-${bet}**"
+        res_text = f"💥 **НЕ УГАДАЛ**\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{actual_val}**\n🔴 Проигрыш: **-${bet}**"
 
     save_db()
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
@@ -622,36 +625,39 @@ async def even_game_result(callback: types.CallbackQuery):
 
     rig_mode = get_rig_mode(user_id, bet)
 
+    even_nums = [2, 4, 6]
+    odd_nums = [1, 3, 5]
+
+    if rig_mode == "win":
+        target_list = even_nums if choice == "even" else odd_nums
+    elif rig_mode == "loss":
+        target_list = odd_nums if choice == "even" else even_nums
+    else:
+        target_list = [1, 2, 3, 4, 5, 6]
+
+    dice_msg = None
     while True:
         dice_msg = await callback.message.answer_dice(emoji="🎲")
-        dice_val = dice_msg.dice.value
-        is_even = dice_val % 2 == 0
-
-        if rig_mode == "win":
-            is_valid = (choice == "even" and is_even) or (choice == "odd" and not is_even)
-        elif rig_mode == "loss":
-            is_valid = (choice == "even" and not is_even) or (choice == "odd" and is_even)
-        else:
-            is_valid = True
-
-        if is_valid:
+        if dice_msg.dice.value in target_list or rig_mode == "none":
             break
-        else:
-            await dice_msg.delete()
+        await dice_msg.delete()
+        await asyncio.sleep(0.2)
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(2.5)
 
-    is_even = dice_val % 2 == 0
+    actual_val = dice_msg.dice.value
+    is_even = actual_val % 2 == 0
     is_win = (choice == "even" and is_even) or (choice == "odd" and not is_even)
+    
     data = get_user_data(user_id)
 
     if is_win:
         win = int(bet * 1.8)
         data["balance"] += win - bet
-        res_text = f"🎉 **ТОЧНО В ЦЕЛЬ!** 🎉\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{dice_val}**\n🟢 Выигрыш: **+${win}**"
+        res_text = f"🎉 **ТОЧНО В ЦЕЛЬ!** 🎉\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{actual_val}**\n🟢 Выигрыш: **+${win}**"
     else:
         data["balance"] -= bet
-        res_text = f"💥 **НЕ УГАДАЛ**\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{dice_val}**\n🔴 Проигрыш: **-${bet}**"
+        res_text = f"💥 **НЕ УГАДАЛ**\n━━━━━━━━━━━━━━━\n🎲 Выпало: **{actual_val}**\n🔴 Проигрыш: **-${bet}**"
 
     save_db()
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
