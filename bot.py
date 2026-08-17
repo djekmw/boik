@@ -167,6 +167,14 @@ def main_keyboard():
     return builder.as_markup()
 
 
+def profile_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📜 Моя история игр", callback_data="my_history_cb")
+    builder.button(text="🔙 Главное меню", callback_data="main_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def bet_keyboard(game_code: str):
     builder = InlineKeyboardBuilder()
     for bet in [50, 100, 250, 500]:
@@ -233,15 +241,52 @@ async def check_balance(callback: types.CallbackQuery, state: FSMContext):
     data = get_user_data(callback.from_user.id)
     status = get_status(callback.from_user.id)
     profile_text = (
-        f"💳 **ЛИЧНЫЙ КАБИНЕТ**\n"
-        f"━━━━━━━━━━━━━━━\n"
+        f"💳 **ЛИЧНЫЙ КАБИНЕТ И ПРОФИЛЬ**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 **Имя:** {callback.from_user.first_name}\n"
-        f"🆔 **ID:** `{callback.from_user.id}`\n"
+        f"🆔 **Ваш ID:** `{callback.from_user.id}`\n"
         f"🏆 **Ранг:** {status}\n"
         f"⭐ **Опыт:** {data['xp']} XP\n"
-        f"💰 **Баланс:** ${data['balance']}"
+        f"💰 **Баланс:** ${data['balance']}\n\n"
+        f"📌 **ОБЩЕДОСТУПНЫЕ КОМАНДЫ:**\n"
+        f"• `/start` — Открыть главное меню\n"
+        f"• `/myhistory` — Посмотреть историю своих игр\n"
     )
-    await callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=main_keyboard())
+    await callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=profile_keyboard())
+
+
+@dp.message(Command("myhistory"))
+@dp.callback_query(F.data == "my_history_cb")
+async def show_my_history(event: types.Message | types.CallbackQuery):
+    user_id = event.from_user.id
+    can_play, msg = check_access(user_id)
+    if not can_play:
+        if isinstance(event, types.CallbackQuery):
+            await event.answer(msg, show_alert=True)
+        else:
+            await event.answer(msg, parse_mode="Markdown")
+        return
+
+    data = get_user_data(user_id)
+    history = data.get("history", [])
+
+    if not history:
+        text = "📜 **У вас пока нет сыгранных игр!**"
+    else:
+        text = "📜 **ВАША ИСТОРИЯ ПОСЛЕДНИХ ИГР:**\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+        for h in reversed(history[-10:]):
+            tag = "✅ ВЫИГРЫШ" if h["result"] == "WIN" else "❌ ПРОИГРЫШ"
+            sign = "+" if h["amount"] > 0 else ""
+            text += f"🕒 `{h['time']}` | **{h['game']}**\n"
+            text += f" └ Ставка: ${h['bet']} | Итог: **{tag} ({sign}${h['amount']})**\n\n"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Профиль", callback_data="check_balance")
+
+    if isinstance(event, types.Message):
+        await event.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+    else:
+        await event.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup())
 
 
 @dp.callback_query(F.data == "get_bonus")
@@ -534,9 +579,9 @@ async def admin_panel(message: types.Message):
 
 async def show_admin_panel(target: types.Message | types.CallbackQuery):
     text = "🛠 **ПАНЕЛЬ АДМИНИСТРАТОРА LOMTIK GAME 2.0**\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     text += f"⚙️ **Авто-слив при ставке от:** `${auto_loss_limit}`\n\n"
-    text += "📊 **СПИСОК ИГРОКОВ:**\n"
+    text += "📊 **СПИСОК ИГРОКОВ И ИХ БАЛАНСЫ:**\n"
     if not users_db:
         text += "└ *Игроков пока нет*\n\n"
     else:
@@ -558,10 +603,12 @@ async def show_admin_panel(target: types.Message | types.CallbackQuery):
     text += "🎮 **УПРАВЛЕНИЕ ПОДКТРУТКОЙ:**\n"
     text += "• `/rig_win ID ИГР` — подкрутить победы\n"
     text += "• `/rig_loss ID ИГР` — подкрутить сливы\n\n"
-    text += "📜 **ИСТОРИЯ ИГР:**\n"
-    text += "• `/history ID` — просмотр последних игр\n\n"
-    text += "💰 **ФИНАНСЫ:**\n"
-    text += "• `/give ID СУММА` | `/take ID СУММА` | `/setlimit СУММА`\n"
+    text += "📜 **ПРОСМОТР ИСТОРИИ:**\n"
+    text += "• `/history ID` — смотреть последние игры игрока\n\n"
+    text += "💰 **УПРАВЛЕНИЕ БАЛАНСОМ И ОГРАНИЧЕНИЯМИ:**\n"
+    text += "• `/give ID СУММА` — выдать баланс\n"
+    text += "• `/take ID СУММА` — забрать баланс\n"
+    text += "• `/setlimit СУММА` — изменить порог авто-слива\n"
 
     builder = InlineKeyboardBuilder()
     builder.button(text="🔄 Обновить данные", callback_data="refresh_admin")
@@ -596,8 +643,8 @@ async def show_user_history(message: types.Message):
             await message.answer(f"📜 У пользователя `{target_id}` пока нет сыгранных игр.", parse_mode="Markdown")
             return
 
-        msg_text = f"📜 **История последних игр (ID: `{target_id}`):**\n━━━━━━━━━━━━━━━━━━━━\n\n"
-        for h in reversed(history[-10:]):  # Показываем последние 10
+        msg_text = f"📜 **История игр игрока (ID: `{target_id}`):**\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        for h in reversed(history[-10:]):
             tag = "✅ WIN" if h["result"] == "WIN" else "❌ LOSS"
             sign = "+" if h["amount"] > 0 else ""
             msg_text += f"🕒 `{h['time']}` | {h['game']}\n"
