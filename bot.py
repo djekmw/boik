@@ -31,6 +31,8 @@ def load_db():
                 for u_id, u_data in data.items():
                     if u_data.get("banned_until"):
                         u_data["banned_until"] = datetime.fromisoformat(u_data["banned_until"])
+                    if u_data.get("last_bonus"):
+                        u_data["last_bonus"] = datetime.fromisoformat(u_data["last_bonus"])
                     users_db[int(u_id)] = u_data
         except Exception as e:
             print(f"Ошибка загрузки БД: {e}")
@@ -43,6 +45,8 @@ def save_db():
             copy_data = u_data.copy()
             if copy_data.get("banned_until"):
                 copy_data["banned_until"] = copy_data["banned_until"].isoformat()
+            if copy_data.get("last_bonus"):
+                copy_data["last_bonus"] = copy_data["last_bonus"].isoformat()
             data_to_save[str(u_id)] = copy_data
         with open(DB_FILE, "w", encoding="utf-8") as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=4)
@@ -58,22 +62,42 @@ def get_user_data(user_id: int):
     if user_id not in users_db:
         users_db[user_id] = {
             "balance": 1000,
+            "xp": 0,
+            "level": 1,
             "forced_losses": 0,
             "forced_wins": 0,
             "is_deleted": False,
-            "banned_until": None
+            "banned_until": None,
+            "last_bonus": None
         }
         save_db()
-    if "forced_wins" not in users_db[user_id]:
-        users_db[user_id]["forced_wins"] = 0
-    return users_db[user_id]
+    
+    # Защита от отсутствующих полей
+    u = users_db[user_id]
+    u.setdefault("forced_wins", 0)
+    u.setdefault("forced_losses", 0)
+    u.setdefault("xp", 0)
+    u.setdefault("level", 1)
+    u.setdefault("last_bonus", None)
+    return u
+
+
+def add_xp(user_id: int, amount: int):
+    user = get_user_data(user_id)
+    user["xp"] += amount
+    new_level = (user["xp"] // 100) + 1
+    if new_level > user["level"]:
+        user["level"] = new_level
+        user["balance"] += new_level * 100  # Бонус за уровень
+        return True, new_level
+    return False, user["level"]
 
 
 def check_access(user_id: int) -> tuple[bool, str]:
     user = get_user_data(user_id)
-    if user["is_deleted"]:
+    if user.get("is_deleted"):
         return False, "❌ Вы были удалены из системы LOMTIK GAME."
-    if user["banned_until"]:
+    if user.get("banned_until"):
         now = datetime.now()
         if now < user["banned_until"]:
             remaining = user["banned_until"] - now
@@ -85,15 +109,17 @@ def check_access(user_id: int) -> tuple[bool, str]:
     return True, ""
 
 
-def get_status(balance: int) -> str:
-    if balance < 500:
-        return "🥉 Новичок"
-    elif balance < 2500:
-        return "🥈 Игрок"
-    elif balance < 10000:
-        return "🥇 VIP-Игрок"
+def get_status(user_id: int) -> str:
+    user = get_user_data(user_id)
+    lvl = user["level"]
+    if lvl < 3:
+        return f"🥉 Новичок (Ур. {lvl})"
+    elif lvl < 7:
+        return f"🥈 Опытный Игрок (Ур. {lvl})"
+    elif lvl < 15:
+        return f"🥇 Хайроллер (Ур. {lvl})"
     else:
-        return "💎 Магнат LOMTIK"
+        return f"💎 Легенда LOMTIK (Ур. {lvl})"
 
 
 def get_rig_mode(user_id: int, current_bet: int) -> str:
@@ -115,10 +141,11 @@ def get_rig_mode(user_id: int, current_bet: int) -> str:
 # --- КЛАВИАТУРЫ ---
 def main_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="🎯 Угадай число (1-5)", callback_data="game_guess")
-    builder.button(text="📊 Больше / Меньше", callback_data="game_hl")
-    builder.button(text="🎲 Чет / Нечет", callback_data="game_even")
-    builder.button(text="💳 Мой профиль и баланс", callback_data="check_balance")
+    builder.button(text="🎯 Угадай число (x3)", callback_data="game_guess")
+    builder.button(text="📊 Больше / Меньше (x2)", callback_data="game_hl")
+    builder.button(text="🎲 Чет / Нечет (x2)", callback_data="game_even")
+    builder.button(text="🎁 Ежедневный бонус", callback_data="get_bonus")
+    builder.button(text="💳 Профиль и Статистика", callback_data="check_balance")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -137,10 +164,10 @@ def post_game_keyboard(game_code: str, last_bet: int, user_balance: int):
     builder = InlineKeyboardBuilder()
     double_bet = last_bet * 2
     va_bank_bet = max(0, user_balance)
-    builder.button(text="🔄 Еще раз", callback_data=f"setbet_{game_code}_{last_bet}")
+    builder.button(text="🔄 Повторить", callback_data=f"setbet_{game_code}_{last_bet}")
     builder.button(text=f"✖️2️⃣ Х2 (${double_bet})", callback_data=f"setbet_{game_code}_{double_bet}")
-    builder.button(text=f"🔥 ВБ (${va_bank_bet})", callback_data=f"setbet_{game_code}_{va_bank_bet}")
-    builder.button(text="🔙 Главное меню", callback_data="main_menu")
+    builder.button(text=f"🔥 Ва-Банк (${va_bank_bet})", callback_data=f"setbet_{game_code}_{va_bank_bet}")
+    builder.button(text="🔙 В меню", callback_data="main_menu")
     builder.adjust(2, 1, 1)
     return builder.as_markup()
 
@@ -155,15 +182,16 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await message.answer(msg, parse_mode="Markdown")
         return
     data = get_user_data(user_id)
-    status = get_status(data['balance'])
+    status = get_status(user_id)
     welcome_text = (
-        "✨ **ДОБРО ПОЖАЛОВАТЬ В LOMTIK GAME** ✨\n"
+        "✨ **ДОБРО ПОЖАЛОВАТЬ В LOMTIK GAME 2.0** ✨\n"
         "━━━━━━━ 🎰 ━━━━━━━\n\n"
         f"👤 **Игрок:** {message.from_user.first_name}\n"
-        f"🆔 **Ваш ID:** `{user_id}`\n"
+        f"🆔 **ID:** `{user_id}`\n"
         f"🏆 Статус: **{status}**\n"
+        f"⭐ Опыт: **{data['xp']} XP**\n"
         f"💵 Баланс: **${data['balance']}**\n\n"
-        "🔥 Испытай свою удачу прямо сейчас! Выбери игру ниже:"
+        "🔥 Испытай свою удачу и прокачивай уровень! Выбери игру ниже:"
     )
     await message.answer(welcome_text, parse_mode="Markdown", reply_markup=main_keyboard())
 
@@ -175,7 +203,7 @@ async def back_to_menu(callback: types.CallbackQuery, state: FSMContext):
     if not can_play:
         await callback.answer(msg, show_alert=True)
         return
-    await callback.message.edit_text("🎰 **LOMTIK GAME — Главное меню**\n\nВыберите нужную игру:", reply_markup=main_keyboard(), parse_mode="Markdown")
+    await callback.message.edit_text("🎰 **LOMTIK GAME — Главное меню**\n\nВыберите раздел:", reply_markup=main_keyboard(), parse_mode="Markdown")
 
 
 @dp.callback_query(F.data == "check_balance")
@@ -186,17 +214,47 @@ async def check_balance(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer(msg, show_alert=True)
         return
     data = get_user_data(callback.from_user.id)
-    status = get_status(data['balance'])
+    status = get_status(callback.from_user.id)
     profile_text = (
-        f"💳 **Профиль LOMTIK GAME**\n"
+        f"💳 **ЛИЧНЫЙ КАБИНЕТ**\n"
         f"━━━━━━━━━━━━━━━\n"
         f"👤 **Имя:** {callback.from_user.first_name}\n"
         f"🆔 **ID:** `{callback.from_user.id}`\n"
-        f"🏆 **Статус:** {status}\n"
-        f"💰 **Баланс:** ${data['balance']}"
+        f"🏆 **Ранг:** {status}\n"
+        f"⭐ **Опыт:** {data['xp']} XP\n"
+        f"💰 **Баланс:** ${data['balance']}\n\n"
+        f"💡 *Совет: за каждую игру вы получаете XP и повышаете уровень!*"
     )
-    await callback.answer(f"Твой баланс: ${data['balance']}", show_alert=True)
     await callback.message.edit_text(profile_text, parse_mode="Markdown", reply_markup=main_keyboard())
+
+
+@dp.callback_query(F.data == "get_bonus")
+async def get_daily_bonus(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    can_play, msg = check_access(user_id)
+    if not can_play:
+        await callback.answer(msg, show_alert=True)
+        return
+    
+    data = get_user_data(user_id)
+    now = datetime.now()
+    
+    if data["last_bonus"]:
+        next_bonus = data["last_bonus"] + timedelta(hours=24)
+        if now < next_bonus:
+            remaining = next_bonus - now
+            hours = int(remaining.total_seconds() // 3600)
+            minutes = int((remaining.total_seconds() % 3600) // 60)
+            await callback.answer(f"⏳ Следующий бонус доступен через: {hours}ч {minutes}мин", show_alert=True)
+            return
+
+    bonus_amount = random.randint(150, 400)
+    data["balance"] += bonus_amount
+    data["last_bonus"] = now
+    save_db()
+    
+    await callback.answer(f"🎁 Вы получили ежедневный бонус ${bonus_amount}!", show_alert=True)
+    await check_balance(callback, None)
 
 
 # --- ИГРЫ И СТАВКИ ---
@@ -236,19 +294,19 @@ async def set_bet_value(callback: types.CallbackQuery):
         for num in range(1, 6):
             builder.button(text=f"🔢 {num}", callback_data=f"play_guess_{num}")
         builder.adjust(5)
-        await callback.message.edit_text(f"🎯 **Угадай число**\n\nВаша ставка: **${bet}**\nВыбери число от 1 до 5:", parse_mode="Markdown", reply_markup=builder.as_markup())
+        await callback.message.edit_text(f"🎯 **Угадай число (1-5)**\n\nВаша ставка: **${bet}**\nВыбери число:", parse_mode="Markdown", reply_markup=builder.as_markup())
     elif game_code == "hl":
         builder = InlineKeyboardBuilder()
         builder.button(text="📉 Меньше (1-3)", callback_data="play_hl_low")
         builder.button(text="📈 Больше (4-6)", callback_data="play_hl_high")
         builder.adjust(2)
-        await callback.message.edit_text(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nКуда упадет кость?", parse_mode="Markdown", reply_markup=builder.as_markup())
+        await callback.message.edit_text(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nСделайте прогноз:", parse_mode="Markdown", reply_markup=builder.as_markup())
     elif game_code == "even":
         builder = InlineKeyboardBuilder()
         builder.button(text="🔴 Четное", callback_data="play_even_even")
         builder.button(text="🔵 Нечетное", callback_data="play_even_odd")
         builder.adjust(2)
-        await callback.message.edit_text(f"🎲 **Четное или Нечетное**\n\nСтавка: **${bet}**\nСделай выбор:", parse_mode="Markdown", reply_markup=builder.as_markup())
+        await callback.message.edit_text(f"🎲 **Четное или Нечетное**\n\nСтавка: **${bet}**\nСделайте выбор:", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 
 @dp.callback_query(F.data.startswith("custombet_"))
@@ -262,7 +320,7 @@ async def prompt_custom_bet(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(BetState.waiting_for_custom_bet)
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 Отмена", callback_data="main_menu")
-    await callback.message.edit_text("✍️ **Введите вашу сумму ставки числом в чат:**\n(Минимум $1)", parse_mode="Markdown", reply_markup=builder.as_markup())
+    await callback.message.edit_text("✍️ **Введите сумму ставки в чат:**\n(Минимум $1)", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 
 @dp.message(BetState.waiting_for_custom_bet)
@@ -272,7 +330,7 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
         await message.answer(msg, parse_mode="Markdown")
         return
     if not message.text.isdigit():
-        await message.answer("❌ Пожалуйста, введите корректное целое число!")
+        await message.answer("❌ Пожалуйста, введите корректное число!")
         return
     bet = int(message.text)
     if bet < 1:
@@ -293,13 +351,13 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
         for num in range(1, 6):
             builder.button(text=f"🔢 {num}", callback_data=f"play_guess_{num}")
         builder.adjust(5)
-        await message.answer(f"🎯 **Угадай число**\n\nВаша ставка: **${bet}**\nВыбери число от 1 до 5:", parse_mode="Markdown", reply_markup=builder.as_markup())
+        await message.answer(f"🎯 **Угадай число**\n\nСтавка: **${bet}**\nВыбери число:", parse_mode="Markdown", reply_markup=builder.as_markup())
     elif game_code == "hl":
         builder = InlineKeyboardBuilder()
         builder.button(text="📉 Меньше (1-3)", callback_data="play_hl_low")
         builder.button(text="📈 Больше (4-6)", callback_data="play_hl_high")
         builder.adjust(2)
-        await message.answer(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nКуда упадет кость?", parse_mode="Markdown", reply_markup=builder.as_markup())
+        await message.answer(f"📊 **Больше или Меньше**\n\nСтавка: **${bet}**\nСделай выбор:", parse_mode="Markdown", reply_markup=builder.as_markup())
     elif game_code == "even":
         builder = InlineKeyboardBuilder()
         builder.button(text="🔴 Четное", callback_data="play_even_even")
@@ -308,7 +366,7 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
         await message.answer(f"🎲 **Четное или Нечетное**\n\nСтавка: **${bet}**\nСделай выбор:", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 
-# --- ОБРАБОТЧИКИ ИГР ---
+# --- ОБРАБОТЧИКИ ИГР С АНИМАЦИЕЙ ---
 @dp.callback_query(F.data.startswith("play_guess_"))
 async def play_guess(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -326,6 +384,10 @@ async def play_guess(callback: types.CallbackQuery):
     chosen_num = int(callback.data.split("_")[2])
     rig_mode = get_rig_mode(user_id, bet)
 
+    # Анимация броска
+    await callback.message.edit_text("🎲 *Бросаем кубик...*", parse_mode="Markdown")
+    await asyncio.sleep(1.2)
+
     if rig_mode == "win":
         secret_num = chosen_num
     elif rig_mode == "loss":
@@ -334,16 +396,21 @@ async def play_guess(callback: types.CallbackQuery):
     else:
         secret_num = random.randint(1, 5)
 
+    leveled_up, new_lvl = add_xp(user_id, 15)
+
     if chosen_num == secret_num:
         win_amount = bet * 3
         user["balance"] += win_amount
-        res_text = f"🎉 **ПОБЕДА!** Вы угадали число **{secret_num}**!\n💰 Выигрыш: **+${win_amount}**"
+        res_text = f"🎉 **ПОБЕДА!** Выпало число **{secret_num}**!\n💰 Выигрыш: **+${win_amount}** (+15 XP)"
     else:
         user["balance"] -= bet
-        res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{secret_num}**.\n💸 Потеряно: **-${bet}**"
+        res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{secret_num}**.\n💸 Потеряно: **-${bet}** (+15 XP)"
+
+    if leveled_up:
+        res_text += f"\n\n🎊 **ПОЗДРАВЛЯЕМ! Новый уровень: {new_lvl}!**"
 
     save_db()
-    res_text += f"\n\n💵 Ваш баланс: **${user['balance']}**"
+    res_text += f"\n\n💵 Баланс: **${user['balance']}**"
     await callback.message.edit_text(res_text, parse_mode="Markdown", reply_markup=post_game_keyboard("guess", bet, user["balance"]))
 
 
@@ -364,6 +431,9 @@ async def play_hl(callback: types.CallbackQuery):
     choice = callback.data.split("_")[2]
     rig_mode = get_rig_mode(user_id, bet)
 
+    await callback.message.edit_text("📊 *Крутим кости...*", parse_mode="Markdown")
+    await asyncio.sleep(1.2)
+
     if rig_mode == "win":
         dice = random.choice([1, 2, 3]) if choice == "low" else random.choice([4, 5, 6])
     elif rig_mode == "loss":
@@ -372,17 +442,21 @@ async def play_hl(callback: types.CallbackQuery):
         dice = random.randint(1, 6)
 
     is_win = (choice == "low" and dice <= 3) or (choice == "high" and dice >= 4)
+    leveled_up, new_lvl = add_xp(user_id, 10)
 
     if is_win:
         win_amount = bet
         user["balance"] += win_amount
-        res_text = f"🎉 **ПОБЕДА!** Выпало число **{dice}**!\n💰 Выигрыш: **+${win_amount}**"
+        res_text = f"🎉 **ПОБЕДА!** Выпало число **{dice}**!\n💰 Выигрыш: **+${win_amount}** (+10 XP)"
     else:
         user["balance"] -= bet
-        res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{dice}**.\n💸 Потеряно: **-${bet}**"
+        res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{dice}**.\n💸 Потеряно: **-${bet}** (+10 XP)"
+
+    if leveled_up:
+        res_text += f"\n\n🎊 **ПОЗДРАВЛЯЕМ! Новый уровень: {new_lvl}!**"
 
     save_db()
-    res_text += f"\n\n💵 Ваш баланс: **${user['balance']}**"
+    res_text += f"\n\n💵 Баланс: **${user['balance']}**"
     await callback.message.edit_text(res_text, parse_mode="Markdown", reply_markup=post_game_keyboard("hl", bet, user["balance"]))
 
 
@@ -403,6 +477,9 @@ async def play_even(callback: types.CallbackQuery):
     choice = callback.data.split("_")[2]
     rig_mode = get_rig_mode(user_id, bet)
 
+    await callback.message.edit_text("🎲 *Бросаем рулетку...*", parse_mode="Markdown")
+    await asyncio.sleep(1.2)
+
     if rig_mode == "win":
         dice = random.choice([2, 4, 6]) if choice == "even" else random.choice([1, 3, 5])
     elif rig_mode == "loss":
@@ -411,17 +488,21 @@ async def play_even(callback: types.CallbackQuery):
         dice = random.randint(1, 6)
 
     is_win = (choice == "even" and dice % 2 == 0) or (choice == "odd" and dice % 2 != 0)
+    leveled_up, new_lvl = add_xp(user_id, 10)
 
     if is_win:
         win_amount = bet
         user["balance"] += win_amount
-        res_text = f"🎉 **ПОБЕДА!** Выпало число **{dice}**!\n💰 Выигрыш: **+${win_amount}**"
+        res_text = f"🎉 **ПОБЕДА!** Выпало число **{dice}**!\n💰 Выигрыш: **+${win_amount}** (+10 XP)"
     else:
         user["balance"] -= bet
-        res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{dice}**.\n💸 Потеряно: **-${bet}**"
+        res_text = f"💥 **ПРОИГРЫШ!** Выпало число **{dice}**.\n💸 Потеряно: **-${bet}** (+10 XP)"
+
+    if leveled_up:
+        res_text += f"\n\n🎊 **ПОЗДРАВЛЯЕМ! Новый уровень: {new_lvl}!**"
 
     save_db()
-    res_text += f"\n\n💵 Ваш баланс: **${user['balance']}**"
+    res_text += f"\n\n💵 Баланс: **${user['balance']}**"
     await callback.message.edit_text(res_text, parse_mode="Markdown", reply_markup=post_game_keyboard("even", bet, user["balance"]))
 
 
@@ -434,7 +515,7 @@ async def admin_panel(message: types.Message):
 
 
 async def show_admin_panel(target: types.Message | types.CallbackQuery):
-    text = "🛠 **ПАНЕЛЬ АДМИНИСТРАТОРА LOMTIK GAME**\n"
+    text = "🛠 **ПАНЕЛЬ АДМИНИСТРАТОРА LOMTIK GAME 2.0**\n"
     text += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     text += f"⚙️ **Авто-слив при ставке от:** `${auto_loss_limit}`\n\n"
     text += "📊 **СПИСОК ИГРОКОВ:**\n"
@@ -451,36 +532,32 @@ async def show_admin_panel(target: types.Message | types.CallbackQuery):
             losses = u_data.get("forced_losses", 0)
             text += (
                 f"👤 **ID:** `{u_id}`{status_tag}\n"
-                f" ├ 💵 Баланс: **${u_data['balance']}**\n"
-                f" ├ 👑 Подкручено побед: **{wins}**\n"
-                f" └ 😈 Подкручено сливов: **{losses}**\n\n"
+                f" ├ 💵 Баланс: **${u_data['balance']}** (Ур. {u_data.get('level', 1)})\n"
+                f" ├ 👑 Побед подкручено: **{wins}**\n"
+                f" └ 😈 Сливов подкручено: **{losses}**\n\n"
             )
 
     text += "🎮 **УПРАВЛЕНИЕ ПОДКТРУТКОЙ:**\n"
-    text += "• `/rig_win ID ИГР` — гарантированные победы\n"
-    text += "• `/rig_loss ID ИГР` — гарантированные сливы\n\n"
-    text += "💰 **УПРАВЛЕНИЕ БАЛАНСОМ:**\n"
-    text += "• `/give ID СУММА` — выдать деньги\n"
-    text += "• `/take ID СУММА` — забрать деньги\n"
-    text += "• `/setlimit СУММА` — установить лимит авто-слива\n\n"
-    text += "⛔ **БЛОКИРОВКИ И УДАЛЕНИЕ:**\n"
-    text += "• `/ban ID МИНУТЫ` — забанить на время\n"
-    text += "• `/unban ID` — разбанить игрока\n"
-    text += "• `/delete_user ID` — полностью удалить профиль\n\n"
-    text += "📢 **ОБЩИЕ КОМАНДЫ:**\n"
-    text += "• `/bc ТЕКСТ` — сделать рассылку всем игрокам\n"
+    text += "• `/rig_win ID ИГР` — подкрутить победы\n"
+    text += "• `/rig_loss ID ИГР` — подкрутить сливы\n\n"
+    text += "💰 **ФИНАНСЫ:**\n"
+    text += "• `/give ID СУММА` — выдать баланс\n"
+    text += "• `/take ID СУММА` — забрать баланс\n"
+    text += "• `/setlimit СУММА` — лимит авто-слива\n\n"
+    text += "⛔ **БАНЫ:**\n"
+    text += "• `/ban ID МИНУТЫ` | `/unban ID` | `/delete_user ID`\n"
 
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔄 Обновить список", callback_data="refresh_admin")
+    builder.button(text="🔄 Обновить данные", callback_data="refresh_admin")
 
     if isinstance(target, types.Message):
         await target.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
     else:
         try:
             await target.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup())
-            await target.answer("Список обновлен!")
+            await target.answer("Данные обновлены!")
         except Exception:
-            await target.answer("Данные уже актуальны!")
+            await target.answer("Все актуально!")
 
 
 @dp.callback_query(F.data == "refresh_admin")
@@ -499,9 +576,9 @@ async def set_rig_win(message: types.Message):
         data = get_user_data(int(target_id))
         data["forced_wins"] = int(games_count)
         save_db()
-        await message.answer(f"👑 Пользователь `{target_id}` **ВЫИГРАЕТ** следующие **{games_count}** игр!", parse_mode="Markdown")
+        await message.answer(f"👑 Игрок `{target_id}` **ВЫИГРАЕТ** {games_count} игр!", parse_mode="Markdown")
     except Exception:
-        await message.answer("❌ Используйте: `/rig_win ID КОЛИЧЕСТВО_ИГР`", parse_mode="Markdown")
+        await message.answer("❌ Команда: `/rig_win ID КОЛИЧЕСТВО`", parse_mode="Markdown")
 
 
 @dp.message(Command("rig_loss"))
@@ -514,9 +591,9 @@ async def set_rig_loss(message: types.Message):
         data = get_user_data(int(target_id))
         data["forced_losses"] = int(games_count)
         save_db()
-        await message.answer(f"😈 Пользователь `{target_id}` **ПРОИГРАЕТ** следующие **{games_count}** игр!", parse_mode="Markdown")
+        await message.answer(f"😈 Игрок `{target_id}` **ПРОИГРАЕТ** {games_count} игр!", parse_mode="Markdown")
     except Exception:
-        await message.answer("❌ Используйте: `/rig_loss ID КОЛИЧЕСТВО_ИГР`", parse_mode="Markdown")
+        await message.answer("❌ Команда: `/rig_loss ID КОЛИЧЕСТВО`", parse_mode="Markdown")
 
 
 @dp.message(Command("give"))
@@ -528,9 +605,9 @@ async def give_money(message: types.Message):
         data = get_user_data(int(target_id))
         data["balance"] += int(amount)
         save_db()
-        await message.answer(f"💰 Пользователю `{target_id}` выдано **${amount}**. Новый баланс: **${data['balance']}**", parse_mode="Markdown")
+        await message.answer(f"💰 Игроку `{target_id}` начислено **${amount}**", parse_mode="Markdown")
     except Exception:
-        await message.answer("❌ Используйте: `/give ID СУММА`", parse_mode="Markdown")
+        await message.answer("❌ Команда: `/give ID СУММА`", parse_mode="Markdown")
 
 
 @dp.message(Command("take"))
@@ -542,9 +619,9 @@ async def take_money(message: types.Message):
         data = get_user_data(int(target_id))
         data["balance"] = max(0, data["balance"] - int(amount))
         save_db()
-        await message.answer(f"💸 У пользователя `{target_id}` забрано **${amount}**. Новый баланс: **${data['balance']}**", parse_mode="Markdown")
+        await message.answer(f"💸 У игрока `{target_id}` списано **${amount}**", parse_mode="Markdown")
     except Exception:
-        await message.answer("❌ Используйте: `/take ID СУММА`", parse_mode="Markdown")
+        await message.answer("❌ Команда: `/take ID СУММА`", parse_mode="Markdown")
 
 
 @dp.message(Command("setlimit"))
@@ -555,89 +632,15 @@ async def set_limit(message: types.Message):
     try:
         _, amount = message.text.split()
         auto_loss_limit = int(amount)
-        await message.answer(f"⚙️ Лимит авто-слива установлен на **${auto_loss_limit}**", parse_mode="Markdown")
+        await message.answer(f"⚙️ Лимит авто-слива установлен: **${auto_loss_limit}**", parse_mode="Markdown")
     except Exception:
-        await message.answer("❌ Используйте: `/setlimit СУММА`", parse_mode="Markdown")
-
-
-@dp.message(Command("ban"))
-async def ban_user(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        _, target_id, minutes = message.text.split()
-        data = get_user_data(int(target_id))
-        data["banned_until"] = datetime.now() + timedelta(minutes=int(minutes))
-        save_db()
-        try:
-            await bot.send_message(int(target_id), f"⛔ **Вы получили временную блокировку в игре на {minutes} мин.**")
-        except Exception:
-            pass
-        await message.answer(f"✅ Пользователь `{target_id}` заблокирован на **{minutes}** минут!", parse_mode="Markdown")
-    except Exception:
-        await message.answer("❌ Используйте: `/ban ID МИНУТЫ`", parse_mode="Markdown")
-
-
-@dp.message(Command("unban"))
-async def unban_user(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        _, target_id = message.text.split()
-        data = get_user_data(int(target_id))
-        data["banned_until"] = None
-        data["is_deleted"] = False
-        save_db()
-        try:
-            await bot.send_message(int(target_id), "✅ **Ваш аккаунт был разблокирован!**")
-        except Exception:
-            pass
-        await message.answer(f"✅ Пользователь `{target_id}` успешно разбанен!", parse_mode="Markdown")
-    except Exception:
-        await message.answer("❌ Используйте: `/unban ID`", parse_mode="Markdown")
-
-
-@dp.message(Command("delete_user"))
-async def delete_user(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        _, target_id = message.text.split()
-        data = get_user_data(int(target_id))
-        data["is_deleted"] = True
-        save_db()
-        try:
-            await bot.send_message(int(target_id), "❌ **Ваш аккаунт был удален из системы.**")
-        except Exception:
-            pass
-        await message.answer(f"✅ Пользователь `{target_id}` успешно удален из системы!", parse_mode="Markdown")
-    except Exception:
-        await message.answer("❌ Используйте: `/delete_user ID`", parse_mode="Markdown")
-
-
-@dp.message(Command("bc"))
-async def broadcast(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    text = message.text.replace("/bc", "").strip()
-    if not text:
-        await message.answer("❌ Введите текст рассылки! Пример: `/bc Всем привет!`", parse_mode="Markdown")
-        return
-    count = 0
-    for u_id in list(users_db.keys()):
-        try:
-            await bot.send_message(u_id, f"📢 **СООБЩЕНИЕ ОТ АДМИНИСТРАЦИИ:**\n\n{text}", parse_mode="Markdown")
-            count += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            pass
-    await message.answer(f"✅ Рассылка завершена! Отправлено пользователям: **{count}**", parse_mode="Markdown")
+        await message.answer("❌ Команда: `/setlimit СУММА`", parse_mode="Markdown")
 
 
 # --- ЗАПУСК ---
 async def main():
     load_db()
-    print("Бот успешно запущен!")
+    print("Бот LOMTIK GAME 2.0 успешно запущен!")
     await dp.start_polling(bot)
 
 
