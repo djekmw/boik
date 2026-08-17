@@ -128,6 +128,18 @@ def bet_keyboard(game_code: str):
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
 
+def post_game_keyboard(game_code: str, last_bet: int, user_balance: int):
+    builder = InlineKeyboardBuilder()
+    double_bet = last_bet * 2
+    va_bank_bet = max(0, user_balance)
+    
+    builder.button(text="🔄 Еще раз", callback_data=f"setbet_{game_code}_{last_bet}")
+    builder.button(text=f"✖️2️⃣ Х2 (${double_bet})", callback_data=f"setbet_{game_code}_{double_bet}")
+    builder.button(text=f"🔥 ВБ (${va_bank_bet})", callback_data=f"setbet_{game_code}_{va_bank_bet}")
+    builder.button(text="🔙 Главное меню", callback_data="main_menu")
+    builder.adjust(2, 1, 1)
+    return builder.as_markup()
+
 # --- КОМАНДЫ ---
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -248,7 +260,9 @@ async def process_custom_bet(message: types.Message, state: FSMContext):
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-    
+    await show_admin_panel(message)
+
+async def show_admin_panel(target: types.Message | types.CallbackQuery):
     text = "🛠 **ПАНЕЛЬ АДМИНИСТРАТОРА LOMTIK GAME**\n"
     text += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     text += f"⚙️ **Авто-слив при ставке от:** `${auto_loss_limit}`\n\n"
@@ -291,7 +305,22 @@ async def admin_panel(message: types.Message):
     text += "📢 **ОБЩИЕ КОМАНДЫ:**\n"
     text += "• `/bc ТЕКСТ` — сделать рассылку всем игрокам\n"
 
-    await message.answer(text, parse_mode="Markdown")
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Обновить список", callback_data="refresh_admin")
+
+    if isinstance(target, types.Message):
+        await target.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+    else:
+        try:
+            await target.message.edit_text(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+            await target.answer("Список обновлен!")
+        except:
+            await target.answer("Данные уже актуальны!")
+
+@dp.callback_query(F.data == "refresh_admin")
+async def refresh_admin_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID: return
+    await show_admin_panel(callback)
 
 @dp.message(Command("rig_win"))
 async def set_rig_win(message: types.Message):
@@ -427,8 +456,13 @@ async def guess_game_start(callback: types.CallbackQuery):
     bet = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     data = get_user_data(user_id)
+    
+    if bet <= 0:
+        await callback.answer("❌ У вас $0 на балансе для ставки!", show_alert=True)
+        return
+
     if data["balance"] < bet:
-        await callback.answer("❌ Недостаточно средств!", show_alert=True)
+        await callback.answer(f"❌ Недостаточно средств! Баланс: ${data['balance']}", show_alert=True)
         return
 
     user_bets[user_id] = bet
@@ -468,7 +502,8 @@ async def guess_game_result(callback: types.CallbackQuery):
 
     save_db()
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
-    await callback.message.edit_text(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
+    
+    await callback.message.edit_text(res_text, parse_mode="Markdown", reply_markup=post_game_keyboard("guess", bet, data["balance"]))
 
 # ИГРА 2: БОЛЬШЕ / МЕНЬШЕ
 @dp.callback_query(F.data.startswith("setbet_hl_"))
@@ -481,8 +516,13 @@ async def hl_game_start(callback: types.CallbackQuery):
     bet = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     data = get_user_data(user_id)
+    
+    if bet <= 0:
+        await callback.answer("❌ У вас $0 на балансе для ставки!", show_alert=True)
+        return
+
     if data["balance"] < bet:
-        await callback.answer("❌ Недостаточно средств!", show_alert=True)
+        await callback.answer(f"❌ Недостаточно средств! Баланс: ${data['balance']}", show_alert=True)
         return
 
     user_bets[user_id] = bet
@@ -503,6 +543,8 @@ async def hl_game_result(callback: types.CallbackQuery):
     bet = user_bets.get(user_id, 50)
     choice = callback.data.split("_")[2]
 
+    await callback.message.edit_reply_markup(reply_markup=None)
+
     rig_mode = get_rig_mode(user_id, bet)
 
     while True:
@@ -520,7 +562,6 @@ async def hl_game_result(callback: types.CallbackQuery):
             break
         else:
             await dice_msg.delete()
-            await asyncio.sleep(0.1)
 
     await asyncio.sleep(2)
 
@@ -537,7 +578,7 @@ async def hl_game_result(callback: types.CallbackQuery):
 
     save_db()
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
-    await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
+    await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=post_game_keyboard("hl", bet, data["balance"]))
 
 # ИГРА 3: ЧЕТ / НЕЧЕТ
 @dp.callback_query(F.data.startswith("setbet_even_"))
@@ -550,8 +591,13 @@ async def even_game_start(callback: types.CallbackQuery):
     bet = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
     data = get_user_data(user_id)
+    
+    if bet <= 0:
+        await callback.answer("❌ У вас $0 на балансе для ставки!", show_alert=True)
+        return
+
     if data["balance"] < bet:
-        await callback.answer("❌ Недостаточно средств!", show_alert=True)
+        await callback.answer(f"❌ Недостаточно средств! Баланс: ${data['balance']}", show_alert=True)
         return
 
     user_bets[user_id] = bet
@@ -572,6 +618,8 @@ async def even_game_result(callback: types.CallbackQuery):
     bet = user_bets.get(user_id, 50)
     choice = callback.data.split("_")[2]
 
+    await callback.message.edit_reply_markup(reply_markup=None)
+
     rig_mode = get_rig_mode(user_id, bet)
 
     while True:
@@ -590,7 +638,6 @@ async def even_game_result(callback: types.CallbackQuery):
             break
         else:
             await dice_msg.delete()
-            await asyncio.sleep(0.1)
 
     await asyncio.sleep(2)
 
@@ -608,7 +655,7 @@ async def even_game_result(callback: types.CallbackQuery):
 
     save_db()
     res_text += f"\n\n💵 Баланс: **${data['balance']}**"
-    await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=main_keyboard())
+    await callback.message.answer(res_text, parse_mode="Markdown", reply_markup=post_game_keyboard("even", bet, data["balance"]))
 
 # --- СТАРТ БОТА С УВЕДОМЛЕНИЕМ ---
 async def on_startup(bot: Bot):
